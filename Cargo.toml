@@ -1,0 +1,3 @@
+[workspace]
+members = ["ext/rumpy"]
+resolver = "2"
