@@ -107,7 +107,8 @@ RSpec.describe "RumPy math functions" do
       a = RumPy.array([1, 2, 3])
       b = RumPy.array([4, 5, 6])
       result = RumPy.dot(a, b)
-      expect(result.to_a).to eq([32.0])  # 1*4 + 2*5 + 3*6 = 32
+      # NumPy returns a scalar for 1D dot product
+      expect(result.to_a).to eq(32.0)  # 1*4 + 2*5 + 3*6 = 32
     end
 
     it "computes matrix multiplication" do

@@ -63,9 +63,9 @@ RSpec.describe RumPy::NDArray do
     it "creates identity matrix" do
       arr = RumPy.eye(3)
       expect(arr.shape).to eq([3, 3])
-      expect(arr[0, 0]).to eq(1.0)
-      expect(arr[0, 1]).to eq(0.0)
-      expect(arr[1, 1]).to eq(1.0)
+      expect(arr[[0, 0]]).to eq(1.0)
+      expect(arr[[0, 1]]).to eq(0.0)
+      expect(arr[[1, 1]]).to eq(1.0)
     end
   end
 

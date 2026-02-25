@@ -88,7 +88,10 @@ pub fn abs(arr: &NDArray) -> Obj<NDArray> {
 
 pub fn sign(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
-    Obj::wrap(NDArray::new(data.mapv(|x| x.signum())))
+    // NumPy's sign returns 0.0 for 0.0, unlike Rust's signum which returns 1.0
+    Obj::wrap(NDArray::new(data.mapv(|x| {
+        if x == 0.0 { 0.0 } else { x.signum() }
+    })))
 }
 
 pub fn floor(arr: &NDArray) -> Obj<NDArray> {
