@@ -25,7 +25,7 @@ pub fn rand(shape: RArray) -> Result<Obj<NDArray>, Error> {
     let size: usize = shape_vec.iter().product();
 
     let mut rng = RNG.lock().unwrap();
-    let dist = Uniform::new(0.0, 1.0);
+    let dist = Uniform::new(0.0, 1.0).unwrap();
     let values: Vec<f64> = (0..size).map(|_| dist.sample(&mut *rng)).collect();
 
     Ok(Obj::wrap(NDArray::new(
@@ -53,7 +53,7 @@ pub fn randint(low: i64, high: i64, shape: RArray) -> Result<Obj<NDArray>, Error
     let size: usize = shape_vec.iter().product();
 
     let mut rng = RNG.lock().unwrap();
-    let dist = Uniform::new(low, high);
+    let dist = Uniform::new(low, high).unwrap();
     let values: Vec<f64> = (0..size).map(|_| dist.sample(&mut *rng) as f64).collect();
 
     Ok(Obj::wrap(NDArray::new(
@@ -67,7 +67,7 @@ pub fn uniform(low: f64, high: f64, shape: RArray) -> Result<Obj<NDArray>, Error
     let size: usize = shape_vec.iter().product();
 
     let mut rng = RNG.lock().unwrap();
-    let dist = Uniform::new(low, high);
+    let dist = Uniform::new(low, high).unwrap();
     let values: Vec<f64> = (0..size).map(|_| dist.sample(&mut *rng)).collect();
 
     Ok(Obj::wrap(NDArray::new(
@@ -154,7 +154,7 @@ pub fn choice(arr: &NDArray, size: usize) -> Result<Obj<NDArray>, Error> {
     }
 
     let mut rng = RNG.lock().unwrap();
-    let dist = Uniform::new(0, n);
+    let dist = Uniform::new(0, n).unwrap();
     let values: Vec<f64> = (0..size)
         .map(|_| {
             let idx = dist.sample(&mut *rng);
