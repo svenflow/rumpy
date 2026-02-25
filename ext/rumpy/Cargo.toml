@@ -1,0 +1,23 @@
+[package]
+name = "rumpy"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam McGrail"]
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+magnus = { version = "0.7", features = ["rb-sys"] }
+rb-sys = { version = "0.9", default-features = false }
+ndarray = { version = "0.16", features = ["serde"] }
+ndarray-linalg = { version = "0.17", features = ["openblas-system"] }
+ndarray-rand = "0.15"
+rand = "0.9"
+rand_distr = "0.5"
+num-traits = "0.2"
+num-complex = "0.4"
+thiserror = "2.0"
+lazy_static = "1.5"
