@@ -557,7 +557,8 @@ pub fn repeat(array: &NDArray, repeats: i64) -> Result<Obj<NDArray>, Error> {
 
 pub fn flip(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let flat: Vec<f64> = data.iter().cloned().rev().collect();
+    let mut flat: Vec<f64> = data.iter().cloned().collect();
+    flat.reverse();
     Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), flat).unwrap())))
 }
 
