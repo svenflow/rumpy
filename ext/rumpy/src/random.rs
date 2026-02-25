@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 // Global RNG state
 lazy_static::lazy_static! {
-    static ref RNG: Mutex<StdRng> = Mutex::new(StdRng::from_entropy());
+    static ref RNG: Mutex<StdRng> = Mutex::new(StdRng::from_os_rng());
 }
 
 fn get_shape(shape: RArray) -> Result<Vec<usize>, Error> {
