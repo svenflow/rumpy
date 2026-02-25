@@ -8,8 +8,6 @@ module RumPy
 
   # Convenience aliases matching numpy conventions
   class << self
-    alias_method :np, :RumPy
-
     # Array creation shortcuts
     def asarray(obj)
       array(obj)
