@@ -28,11 +28,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("arange", function!(creation::arange, 3))?;
     rumpy.define_singleton_method("linspace", function!(creation::linspace, 3))?;
     rumpy.define_singleton_method("logspace", function!(creation::logspace, 3))?;
+    rumpy.define_singleton_method("logspace_base", function!(creation::logspace_base, 4))?;
     rumpy.define_singleton_method("geomspace", function!(creation::geomspace, 3))?;
     rumpy.define_singleton_method("meshgrid", function!(creation::meshgrid, 2))?;
+    rumpy.define_singleton_method("meshgrid_indexing", function!(creation::meshgrid_indexing, 3))?;
     rumpy.define_singleton_method("eye", function!(creation::eye, 1))?;
+    rumpy.define_singleton_method("eye_k", function!(creation::eye_k, 3))?;
     rumpy.define_singleton_method("identity", function!(creation::identity, 1))?;
     rumpy.define_singleton_method("diag", function!(creation::diag, 1))?;
+    rumpy.define_singleton_method("diag_k", function!(creation::diag_k, 2))?;
     rumpy.define_singleton_method("zeros_like", function!(creation::zeros_like, 1))?;
     rumpy.define_singleton_method("ones_like", function!(creation::ones_like, 1))?;
 
@@ -127,6 +131,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("mean", function!(stats::mean, 1))?;
     rumpy.define_singleton_method("std", function!(stats::std, 1))?;
     rumpy.define_singleton_method("var", function!(stats::var, 1))?;
+    rumpy.define_singleton_method("std_ddof", function!(stats::std_ddof, 2))?;
+    rumpy.define_singleton_method("var_ddof", function!(stats::var_ddof, 2))?;
     rumpy.define_singleton_method("min", function!(stats::min, 1))?;
     rumpy.define_singleton_method("max", function!(stats::max, 1))?;
     rumpy.define_singleton_method("argmin", function!(stats::argmin, 1))?;
@@ -165,9 +171,11 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("corrcoef", function!(stats::corrcoef, 1))?;
     rumpy.define_singleton_method("cov", function!(stats::cov, 1))?;
     rumpy.define_singleton_method("trapz", function!(stats::trapz, 2))?;
+    rumpy.define_singleton_method("trapz_x", function!(stats::trapz_x, 2))?;
     rumpy.define_singleton_method("polyfit", function!(stats::polyfit, 3))?;
     rumpy.define_singleton_method("polyval", function!(stats::polyval, 2))?;
     rumpy.define_singleton_method("digitize", function!(stats::digitize, 2))?;
+    rumpy.define_singleton_method("digitize_right", function!(stats::digitize_right, 3))?;
 
     // NDArray aggregation methods
     ndarray_class.define_method("sum", method!(array::NDArray::sum, 0))?;
@@ -194,6 +202,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     linalg_mod.define_singleton_method("trace", function!(linalg::trace, 1))?;
     linalg_mod.define_singleton_method("rank", function!(linalg::rank, 1))?;
     linalg_mod.define_singleton_method("norm", function!(linalg::norm, 1))?;
+    linalg_mod.define_singleton_method("norm_ord", function!(linalg::norm_ord, 2))?;
     linalg_mod.define_singleton_method("cond", function!(linalg::cond, 1))?;
     linalg_mod.define_singleton_method("eig", function!(linalg::eig, 1))?;
     linalg_mod.define_singleton_method("eigvals", function!(linalg::eigvals, 1))?;
@@ -218,6 +227,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     random_mod.define_singleton_method("poisson", function!(random::poisson, 2))?;
     random_mod.define_singleton_method("exponential", function!(random::exponential, 2))?;
     random_mod.define_singleton_method("choice", function!(random::choice, 2))?;
+    random_mod.define_singleton_method("choice_full", function!(random::choice_full, 4))?;
     random_mod.define_singleton_method("shuffle", function!(random::shuffle, 1))?;
     random_mod.define_singleton_method("permutation", function!(random::permutation, 1))?;
     random_mod.define_singleton_method("seed", function!(random::seed, 1))?;
@@ -233,11 +243,13 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("hsplit", function!(array::hsplit, 2))?;
     rumpy.define_singleton_method("tile", function!(array::tile, 2))?;
     rumpy.define_singleton_method("repeat", function!(array::repeat, 2))?;
+    rumpy.define_singleton_method("repeat_axis", function!(array::repeat_axis, 3))?;
     rumpy.define_singleton_method("flip", function!(array::flip, 1))?;
     rumpy.define_singleton_method("fliplr", function!(array::fliplr, 1))?;
     rumpy.define_singleton_method("flipud", function!(array::flipud, 1))?;
     rumpy.define_singleton_method("roll", function!(array::roll, 2))?;
     rumpy.define_singleton_method("rot90", function!(array::rot90, 1))?;
+    rumpy.define_singleton_method("rot90_k", function!(array::rot90_k, 2))?;
 
     // Logical operations
     rumpy.define_singleton_method("logical_and", function!(math::logical_and, 2))?;
@@ -245,16 +257,19 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("logical_not", function!(math::logical_not, 1))?;
     rumpy.define_singleton_method("logical_xor", function!(math::logical_xor, 2))?;
     rumpy.define_singleton_method("where", function!(math::where_fn, 3))?;
-    rumpy.define_singleton_method("nonzero", function!(math::nonzero, 1))?;
+    rumpy.define_singleton_method("nonzero", function!(math::nonzero, 1))?;  // Returns RArray of NDArrays (one per dimension)
     rumpy.define_singleton_method("flatnonzero", function!(math::flatnonzero, 1))?;
 
     // Sorting and searching
     rumpy.define_singleton_method("sort", function!(array::sort, 1))?;
+    rumpy.define_singleton_method("sort_axis", function!(array::sort_axis, 2))?;
     rumpy.define_singleton_method("argsort", function!(array::argsort, 1))?;
+    rumpy.define_singleton_method("argsort_axis", function!(array::argsort_axis, 2))?;
     rumpy.define_singleton_method("searchsorted", function!(array::searchsorted, 2))?;
     rumpy.define_singleton_method("unique", function!(array::unique, 1))?;
     rumpy.define_singleton_method("squeeze", function!(array::squeeze, 1))?;
     rumpy.define_singleton_method("take", function!(array::take, 2))?;
+    rumpy.define_singleton_method("take_axis", function!(array::take_axis, 3))?;
     rumpy.define_singleton_method("put", function!(array::put, 3))?;
     rumpy.define_singleton_method("pad", function!(array::pad, 3))?;
 

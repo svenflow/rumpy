@@ -144,23 +144,114 @@ pub fn exponential(scale: f64, shape: RArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Random choice from array
+/// Random choice from array (with replacement by default)
 pub fn choice(arr: &NDArray, size: usize) -> Result<Obj<NDArray>, Error> {
+    choice_full(arr, size, Some(true), None)
+}
+
+/// Random choice with replace and p (probability) parameters
+/// replace=True: sample with replacement (default)
+/// replace=False: sample without replacement (size must be <= array length)
+/// p: probability array (must sum to 1.0, same length as arr)
+pub fn choice_full(arr: &NDArray, size: usize, replace: Option<bool>, p: Option<&NDArray>) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
     let n = data.len();
+    let replace = replace.unwrap_or(true);
 
     if n == 0 {
         return Err(Error::new(exception::arg_error(), "Array is empty"));
     }
 
+    if !replace && size > n {
+        return Err(Error::new(exception::arg_error(),
+            format!("Cannot take {} samples without replacement from array of size {}", size, n)));
+    }
+
+    let flat: Vec<f64> = data.iter().cloned().collect();
     let mut rng = RNG.lock().unwrap();
-    let dist = Uniform::new(0, n).unwrap();
-    let values: Vec<f64> = (0..size)
-        .map(|_| {
-            let idx = dist.sample(&mut *rng);
-            data.iter().nth(idx).cloned().unwrap_or(0.0)
-        })
-        .collect();
+
+    // Get probabilities
+    let probs: Option<Vec<f64>> = p.map(|p_arr| p_arr.get_data().iter().cloned().collect());
+
+    let values: Vec<f64> = if let Some(probs) = probs {
+        // Validate probabilities
+        if probs.len() != n {
+            return Err(Error::new(exception::arg_error(), "p must have the same length as the array"));
+        }
+        let sum: f64 = probs.iter().sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(Error::new(exception::arg_error(), format!("p must sum to 1.0, got {}", sum)));
+        }
+
+        // Sample with probabilities using cumulative distribution
+        let mut cumsum = vec![0.0; n + 1];
+        for i in 0..n {
+            cumsum[i + 1] = cumsum[i] + probs[i];
+        }
+
+        if replace {
+            // With replacement
+            (0..size)
+                .map(|_| {
+                    let r: f64 = rng.random();
+                    // Binary search in cumsum
+                    let mut lo = 0;
+                    let mut hi = n;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if r >= cumsum[mid + 1] {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    flat[lo.min(n - 1)]
+                })
+                .collect()
+        } else {
+            // Without replacement - use reservoir-like approach
+            let mut available: Vec<usize> = (0..n).collect();
+            let mut result = Vec::with_capacity(size);
+
+            for _ in 0..size {
+                // Recalculate probabilities for remaining elements
+                let remaining_sum: f64 = available.iter().map(|&i| probs[i]).sum();
+                let r: f64 = rng.random::<f64>() * remaining_sum;
+
+                let mut cumsum = 0.0;
+                let mut chosen_idx = 0;
+                for (j, &i) in available.iter().enumerate() {
+                    cumsum += probs[i];
+                    if r <= cumsum {
+                        chosen_idx = j;
+                        break;
+                    }
+                }
+
+                result.push(flat[available[chosen_idx]]);
+                available.remove(chosen_idx);
+            }
+            result
+        }
+    } else {
+        // Uniform probabilities
+        if replace {
+            let dist = Uniform::new(0, n).unwrap();
+            (0..size)
+                .map(|_| flat[dist.sample(&mut *rng)])
+                .collect()
+        } else {
+            // Fisher-Yates shuffle for without replacement
+            let mut indices: Vec<usize> = (0..n).collect();
+            for i in 0..size {
+                let remaining = n - i;
+                let dist = Uniform::new(0, remaining).unwrap();
+                let j = i + dist.sample(&mut *rng);
+                indices.swap(i, j);
+            }
+            indices[..size].iter().map(|&i| flat[i]).collect()
+        }
+    };
 
     Ok(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(IxDyn(&[size]), values).unwrap(),

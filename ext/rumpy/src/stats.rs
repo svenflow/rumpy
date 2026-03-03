@@ -108,6 +108,11 @@ pub fn std(arr: &NDArray) -> f64 {
     var(arr).sqrt()
 }
 
+/// Standard deviation with ddof (delta degrees of freedom) parameter
+pub fn std_ddof(arr: &NDArray, ddof: Option<i64>) -> f64 {
+    var_ddof(arr, ddof).sqrt()
+}
+
 /// Std with optional axis parameter
 pub fn std_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
     let ruby = magnus::Ruby::get().unwrap();
@@ -125,9 +130,20 @@ pub fn std_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
 }
 
 pub fn var(arr: &NDArray) -> f64 {
+    var_ddof(arr, Some(0))
+}
+
+/// Variance with ddof (delta degrees of freedom) parameter
+/// ddof=0 for population variance, ddof=1 for sample variance
+pub fn var_ddof(arr: &NDArray, ddof: Option<i64>) -> f64 {
     let data = arr.get_data();
-    let m = data.sum() / data.len() as f64;
-    data.mapv(|x| (x - m).powi(2)).sum() / data.len() as f64
+    let n = data.len();
+    let ddof = ddof.unwrap_or(0) as usize;
+    if n <= ddof {
+        return f64::NAN;
+    }
+    let m = data.sum() / n as f64;
+    data.mapv(|x| (x - m).powi(2)).sum() / (n - ddof) as f64
 }
 
 /// Var with optional axis parameter
@@ -592,6 +608,8 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
         })
         .collect();
 
+    // Use n-1 divisor (Bessel's correction) for consistency with cov() and NumPy
+    let divisor = (n_obs - 1).max(1) as f64;
     let mut cov = vec![0.0; n_vars * n_vars];
     for i in 0..n_vars {
         for j in 0..n_vars {
@@ -599,7 +617,7 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
             for k in 0..n_obs {
                 sum += (data[[i, k]] - means[i]) * (data[[j, k]] - means[j]);
             }
-            cov[i * n_vars + j] = sum / n_obs as f64;
+            cov[i * n_vars + j] = sum / divisor;
         }
     }
 
@@ -685,18 +703,22 @@ pub fn nanstd(arr: &NDArray) -> f64 {
 
 pub fn nanmin(arr: &NDArray) -> f64 {
     let data = arr.get_data();
-    data.iter()
-        .filter(|x| !x.is_nan())
-        .cloned()
-        .fold(f64::INFINITY, f64::min)
+    let non_nan: Vec<f64> = data.iter().filter(|x| !x.is_nan()).cloned().collect();
+    if non_nan.is_empty() {
+        // NumPy returns NaN for all-NaN arrays with a warning
+        return f64::NAN;
+    }
+    non_nan.iter().cloned().fold(f64::INFINITY, f64::min)
 }
 
 pub fn nanmax(arr: &NDArray) -> f64 {
     let data = arr.get_data();
-    data.iter()
-        .filter(|x| !x.is_nan())
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max)
+    let non_nan: Vec<f64> = data.iter().filter(|x| !x.is_nan()).cloned().collect();
+    if non_nan.is_empty() {
+        // NumPy returns NaN for all-NaN arrays with a warning
+        return f64::NAN;
+    }
+    non_nan.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
 }
 
 pub fn nanargmin(arr: &NDArray) -> Result<usize, Error> {
@@ -793,6 +815,31 @@ pub fn trapz(y: &NDArray, dx: f64) -> f64 {
         sum += (flat[i] + flat[i+1]) / 2.0 * dx;
     }
     sum
+}
+
+/// Trapezoidal integration with x array (non-uniform spacing)
+pub fn trapz_x(y: &NDArray, x: &NDArray) -> Result<f64, Error> {
+    let y_data = y.get_data();
+    let x_data = x.get_data();
+
+    let y_flat: Vec<f64> = y_data.iter().cloned().collect();
+    let x_flat: Vec<f64> = x_data.iter().cloned().collect();
+
+    if y_flat.len() != x_flat.len() {
+        return Err(Error::new(exception::arg_error(), "x and y must have the same length"));
+    }
+
+    let n = y_flat.len();
+    if n < 2 {
+        return Ok(0.0);
+    }
+
+    let mut sum = 0.0;
+    for i in 0..n-1 {
+        let dx = x_flat[i+1] - x_flat[i];
+        sum += (y_flat[i] + y_flat[i+1]) / 2.0 * dx;
+    }
+    Ok(sum)
 }
 
 pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Error> {
@@ -893,17 +940,30 @@ pub fn polyval(p: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
+    digitize_right(x, bins, Some(false))
+}
+
+/// Digitize with right parameter
+/// right=False (default): bins[i-1] <= x < bins[i]
+/// right=True: bins[i-1] < x <= bins[i]
+pub fn digitize_right(x: &NDArray, bins: &NDArray, right: Option<bool>) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let bins_data = bins.get_data();
 
     let bins_vec: Vec<f64> = bins_data.iter().cloned().collect();
+    let right = right.unwrap_or(false);
 
     let result: Vec<f64> = x_data.iter().map(|&xi| {
         let mut lo = 0;
         let mut hi = bins_vec.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if xi >= bins_vec[mid] {
+            let cmp = if right {
+                xi > bins_vec[mid]
+            } else {
+                xi >= bins_vec[mid]
+            };
+            if cmp {
                 lo = mid + 1;
             } else {
                 hi = mid;

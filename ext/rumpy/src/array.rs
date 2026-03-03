@@ -701,7 +701,42 @@ pub fn hstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn dstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
-    concatenate(arrays, Some(2))
+    // NumPy dstack: stack arrays in sequence depth-wise (along third axis)
+    // 1D arrays are promoted to shape (1, N, 1)
+    // 2D arrays are promoted to shape (M, N, 1)
+    let mut arr_vec: Vec<ArrayD<f64>> = Vec::new();
+
+    for item in arrays.into_iter() {
+        let arr = <&NDArray>::try_convert(item)?;
+        let data = arr.get_data().clone();
+        let shape = data.shape().to_vec();
+
+        let promoted = if shape.len() == 1 {
+            // 1D -> (1, N, 1)
+            let n = shape[0];
+            data.into_shape(IxDyn(&[1, n, 1]))
+                .map_err(|e| Error::new(exception::arg_error(), format!("Cannot reshape: {}", e)))?
+        } else if shape.len() == 2 {
+            // 2D -> (M, N, 1)
+            let m = shape[0];
+            let n = shape[1];
+            data.into_shape(IxDyn(&[m, n, 1]))
+                .map_err(|e| Error::new(exception::arg_error(), format!("Cannot reshape: {}", e)))?
+        } else {
+            data
+        };
+        arr_vec.push(promoted);
+    }
+
+    if arr_vec.is_empty() {
+        return Err(Error::new(exception::arg_error(), "Need at least one array"));
+    }
+
+    let views: Vec<_> = arr_vec.iter().map(|a| a.view()).collect();
+    let result = ndarray::concatenate(Axis(2), &views)
+        .map_err(|e| Error::new(exception::arg_error(), format!("Cannot dstack: {}", e)))?;
+
+    Ok(Obj::wrap(NDArray::new(result)))
 }
 
 pub fn stack(arrays: RArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
@@ -800,12 +835,62 @@ pub fn tile(array: &NDArray, reps: RArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn repeat(array: &NDArray, repeats: i64) -> Result<Obj<NDArray>, Error> {
+    repeat_axis(array, repeats, None)
+}
+
+/// Repeat elements along an axis
+/// axis=None: repeat flattened array
+/// axis=i: repeat along axis i
+pub fn repeat_axis(array: &NDArray, repeats: i64, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let flat: Vec<f64> = data
-        .iter()
-        .flat_map(|&x| std::iter::repeat(x).take(repeats as usize))
-        .collect();
-    Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[flat.len()]), flat).unwrap())))
+    let repeats = repeats as usize;
+
+    match axis {
+        None => {
+            // Repeat flattened
+            let flat: Vec<f64> = data
+                .iter()
+                .flat_map(|&x| std::iter::repeat(x).take(repeats))
+                .collect();
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[flat.len()]), flat).unwrap())))
+        }
+        Some(axis_i) => {
+            let ndim = data.ndim();
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
+
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            let shape = data.shape().to_vec();
+            let mut new_shape = shape.clone();
+            new_shape[axis] *= repeats;
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = Vec::with_capacity(flat.len() * repeats);
+
+            for o in 0..outer_size.max(1) {
+                for a in 0..axis_len {
+                    for _ in 0..repeats {
+                        for i in 0..inner_size.max(1) {
+                            let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                            result_data.push(flat[flat_idx]);
+                        }
+                    }
+                }
+            }
+
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&new_shape), result_data).unwrap())))
+        }
+    }
 }
 
 pub fn flip(array: &NDArray) -> Result<Obj<NDArray>, Error> {
@@ -853,15 +938,27 @@ pub fn roll(array: &NDArray, shift: i64) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn rot90(array: &NDArray) -> Result<Obj<NDArray>, Error> {
+    rot90_k(array, Some(1))
+}
+
+/// Rotate array by 90 degrees k times (counter-clockwise)
+pub fn rot90_k(array: &NDArray, k: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     if data.ndim() < 2 {
         return Err(Error::new(exception::arg_error(), "Array must be 2D or higher"));
     }
 
-    // Transpose and flip
-    let transposed = data.t().to_owned();
-    let mut result = transposed;
-    result.invert_axis(Axis(0));
+    // Normalize k to 0-3 range
+    let k = k.unwrap_or(1);
+    let k = ((k % 4) + 4) % 4;
+
+    let mut result = data.clone();
+    for _ in 0..k {
+        // Transpose and flip for one 90-degree rotation
+        let transposed = result.t().to_owned();
+        result = transposed;
+        result.invert_axis(Axis(0));
+    }
 
     Ok(Obj::wrap(NDArray::new(result)))
 }
@@ -877,21 +974,129 @@ fn nan_safe_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
 }
 
 pub fn sort(array: &NDArray) -> Result<Obj<NDArray>, Error> {
+    sort_axis(array, None)
+}
+
+/// Sort with optional axis parameter
+/// axis=None (default): sort flattened array
+/// axis=i: sort along axis i
+pub fn sort_axis(array: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let mut flat: Vec<f64> = data.iter().cloned().collect();
-    // NaN-safe sort: NaN values go to end (NumPy behavior)
-    flat.sort_by(nan_safe_cmp);
-    Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), flat).unwrap())))
+
+    match axis {
+        None => {
+            // Sort flattened array
+            let mut flat: Vec<f64> = data.iter().cloned().collect();
+            flat.sort_by(nan_safe_cmp);
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[flat.len()]), flat).unwrap())))
+        }
+        Some(axis_i) => {
+            let ndim = data.ndim();
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
+
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            let shape = data.shape().to_vec();
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = vec![0.0; flat.len()];
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    // Extract slice along axis
+                    let mut slice: Vec<f64> = Vec::with_capacity(axis_len);
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        slice.push(flat[flat_idx]);
+                    }
+
+                    // Sort the slice
+                    slice.sort_by(nan_safe_cmp);
+
+                    // Put back
+                    for (a, &val) in slice.iter().enumerate() {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        result_data[flat_idx] = val;
+                    }
+                }
+            }
+
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), result_data).unwrap())))
+        }
+    }
 }
 
 pub fn argsort(array: &NDArray) -> Result<Obj<NDArray>, Error> {
+    argsort_axis(array, None)
+}
+
+/// Argsort with optional axis parameter
+pub fn argsort_axis(array: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let flat: Vec<f64> = data.iter().cloned().collect();
-    let mut indices: Vec<usize> = (0..flat.len()).collect();
-    // NaN-safe argsort
-    indices.sort_by(|&a, &b| nan_safe_cmp(&flat[a], &flat[b]));
-    let result: Vec<f64> = indices.iter().map(|&i| i as f64).collect();
-    Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), result).unwrap())))
+
+    match axis {
+        None => {
+            // Argsort flattened array
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut indices: Vec<usize> = (0..flat.len()).collect();
+            indices.sort_by(|&a, &b| nan_safe_cmp(&flat[a], &flat[b]));
+            let result: Vec<f64> = indices.iter().map(|&i| i as f64).collect();
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[result.len()]), result).unwrap())))
+        }
+        Some(axis_i) => {
+            let ndim = data.ndim();
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
+
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            let shape = data.shape().to_vec();
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = vec![0.0; flat.len()];
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    // Extract slice along axis
+                    let slice: Vec<f64> = (0..axis_len)
+                        .map(|a| {
+                            let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                            flat[flat_idx]
+                        })
+                        .collect();
+
+                    // Get argsort indices
+                    let mut indices: Vec<usize> = (0..axis_len).collect();
+                    indices.sort_by(|&a, &b| nan_safe_cmp(&slice[a], &slice[b]));
+
+                    // Put back
+                    for (a, &idx) in indices.iter().enumerate() {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        result_data[flat_idx] = idx as f64;
+                    }
+                }
+            }
+
+            Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), result_data).unwrap())))
+        }
+    }
 }
 
 pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
@@ -939,22 +1144,65 @@ pub fn squeeze(array: &NDArray) -> Result<Obj<NDArray>, Error> {
 
 /// Take elements from array along an axis
 pub fn take(array: &NDArray, indices: &NDArray) -> Result<Obj<NDArray>, Error> {
+    take_axis(array, indices, None)
+}
+
+/// Take elements from array along a specified axis
+pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let idx_data = indices.get_data();
+    let idx_vec: Vec<usize> = idx_data.iter().map(|&x| x as usize).collect();
 
-    let flat: Vec<f64> = data.iter().cloned().collect();
-    let result: Vec<f64> = idx_data.iter().map(|&i| {
-        let idx = i as usize;
-        if idx < flat.len() {
-            flat[idx]
-        } else {
-            f64::NAN
+    match axis {
+        None => {
+            // Take from flattened array
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let result: Vec<f64> = idx_vec.iter().map(|&i| {
+                if i < flat.len() { flat[i] } else { f64::NAN }
+            }).collect();
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(idx_data.raw_dim(), result).unwrap()
+            )))
         }
-    }).collect();
+        Some(axis_i) => {
+            let ndim = data.ndim();
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
 
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(idx_data.raw_dim(), result).unwrap()
-    )))
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            let shape = data.shape().to_vec();
+            let num_indices = idx_vec.len();
+
+            let mut new_shape = shape.clone();
+            new_shape[axis] = num_indices;
+
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+            let axis_len = shape[axis];
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = Vec::with_capacity(outer_size.max(1) * num_indices * inner_size.max(1));
+
+            for o in 0..outer_size.max(1) {
+                for &idx in &idx_vec {
+                    for i in 0..inner_size.max(1) {
+                        let flat_idx = o * axis_len * inner_size + idx * inner_size + i;
+                        result_data.push(if flat_idx < flat.len() { flat[flat_idx] } else { f64::NAN });
+                    }
+                }
+            }
+
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(IxDyn(&new_shape), result_data).unwrap()
+            )))
+        }
+    }
 }
 
 /// Put values into array at specified indices

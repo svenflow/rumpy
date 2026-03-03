@@ -509,22 +509,46 @@ pub fn cross(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
 
-    if a_data.len() != 3 || b_data.len() != 3 {
-        return Err(Error::new(exception::arg_error(), "Cross product requires 3D vectors"));
-    }
-
     let a_vec: Vec<f64> = a_data.iter().cloned().collect();
     let b_vec: Vec<f64> = b_data.iter().cloned().collect();
 
-    let result = vec![
-        a_vec[1] * b_vec[2] - a_vec[2] * b_vec[1],
-        a_vec[2] * b_vec[0] - a_vec[0] * b_vec[2],
-        a_vec[0] * b_vec[1] - a_vec[1] * b_vec[0],
-    ];
+    // Handle 2D and 3D vectors
+    if a_vec.len() == 2 && b_vec.len() == 2 {
+        // 2D cross product returns scalar (z-component of 3D cross)
+        let result = a_vec[0] * b_vec[1] - a_vec[1] * b_vec[0];
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[]), vec![result]).unwrap(),
+        )));
+    }
 
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[3]), result).unwrap(),
-    )))
+    if a_vec.len() == 3 && b_vec.len() == 3 {
+        // 3D cross product
+        let result = vec![
+            a_vec[1] * b_vec[2] - a_vec[2] * b_vec[1],
+            a_vec[2] * b_vec[0] - a_vec[0] * b_vec[2],
+            a_vec[0] * b_vec[1] - a_vec[1] * b_vec[0],
+        ];
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[3]), result).unwrap(),
+        )));
+    }
+
+    // Mixed 2D/3D: extend 2D to 3D with z=0
+    if (a_vec.len() == 2 || a_vec.len() == 3) && (b_vec.len() == 2 || b_vec.len() == 3) {
+        let a3 = if a_vec.len() == 2 { vec![a_vec[0], a_vec[1], 0.0] } else { a_vec };
+        let b3 = if b_vec.len() == 2 { vec![b_vec[0], b_vec[1], 0.0] } else { b_vec };
+
+        let result = vec![
+            a3[1] * b3[2] - a3[2] * b3[1],
+            a3[2] * b3[0] - a3[0] * b3[2],
+            a3[0] * b3[1] - a3[1] * b3[0],
+        ];
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[3]), result).unwrap(),
+        )));
+    }
+
+    Err(Error::new(exception::arg_error(), "Cross product requires 2D or 3D vectors"))
 }
 
 pub fn tensordot(a: &NDArray, b: &NDArray, axes: i64) -> Result<Obj<NDArray>, Error> {
@@ -615,7 +639,48 @@ pub fn where_fn(condition: &NDArray, x: &NDArray, y: &NDArray) -> Result<Obj<NDA
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
-pub fn nonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+pub fn nonzero(arr: &NDArray) -> Result<magnus::RArray, Error> {
+    use magnus::RArray;
+
+    let data = arr.get_data();
+    let shape = data.shape();
+    let ndim = data.ndim();
+
+    // Find all nonzero element positions
+    let mut positions: Vec<Vec<usize>> = vec![Vec::new(); ndim];
+
+    // Iterate over all elements with their multi-dimensional indices
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    for (flat_idx, &val) in flat.iter().enumerate() {
+        if val != 0.0 {
+            // Convert flat index to multi-dimensional index
+            let mut remaining = flat_idx;
+            let mut multi_idx = vec![0usize; ndim];
+            for d in (0..ndim).rev() {
+                let dim_size = shape[d];
+                multi_idx[d] = remaining % dim_size;
+                remaining /= dim_size;
+            }
+            for d in 0..ndim {
+                positions[d].push(multi_idx[d]);
+            }
+        }
+    }
+
+    // Return tuple of arrays (one per dimension)
+    let result = RArray::new();
+    for d in 0..ndim {
+        let indices: Vec<f64> = positions[d].iter().map(|&i| i as f64).collect();
+        let arr = NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[indices.len()]), indices).unwrap()
+        );
+        result.push(Obj::wrap(arr))?;
+    }
+
+    Ok(result)
+}
+
+pub fn flatnonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
     let indices: Vec<f64> = data
         .iter()
@@ -627,10 +692,6 @@ pub fn nonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(IxDyn(&[indices.len()]), indices).unwrap(),
     )))
-}
-
-pub fn flatnonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    nonzero(arr)
 }
 
 // FFT - Not implemented (requires complex number support and rustfft crate)

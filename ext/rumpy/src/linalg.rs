@@ -226,9 +226,111 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
     Ok(rank)
 }
 
-/// Frobenius norm
+/// Frobenius norm (default)
 pub fn norm(arr: &NDArray) -> Result<f64, Error> {
+    norm_ord(arr, None)
+}
+
+/// Matrix/vector norm with ord parameter
+/// ord=None or ord=2: Frobenius norm for matrices, 2-norm for vectors
+/// ord=1: max column sum for matrices, 1-norm for vectors
+/// ord=-1: min column sum for matrices
+/// ord="inf": max row sum for matrices, infinity norm for vectors
+/// ord=-"inf": min row sum for matrices
+pub fn norm_ord(arr: &NDArray, ord: Option<f64>) -> Result<f64, Error> {
     let data = arr.get_data();
+
+    // Handle 1D (vector norm)
+    if data.ndim() == 1 {
+        let flat: Vec<f64> = data.iter().cloned().collect();
+        return match ord {
+            None | Some(2.0) => {
+                let sum_sq: f64 = flat.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(1.0) => {
+                Ok(flat.iter().map(|&x| x.abs()).sum())
+            }
+            Some(p) if p == f64::INFINITY => {
+                Ok(flat.iter().map(|&x| x.abs()).fold(0.0, f64::max))
+            }
+            Some(p) if p == f64::NEG_INFINITY => {
+                Ok(flat.iter().map(|&x| x.abs()).fold(f64::INFINITY, f64::min))
+            }
+            Some(0.0) => {
+                // 0-norm = count of nonzero elements
+                Ok(flat.iter().filter(|&&x| x != 0.0).count() as f64)
+            }
+            Some(p) => {
+                // p-norm
+                let sum: f64 = flat.iter().map(|&x| x.abs().powf(p)).sum();
+                Ok(sum.powf(1.0 / p))
+            }
+        };
+    }
+
+    // Handle 2D (matrix norm)
+    if data.ndim() == 2 {
+        let shape = data.shape();
+        let m = shape[0];
+        let n = shape[1];
+
+        return match ord {
+            None => {
+                // Frobenius norm
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(2.0) => {
+                // Frobenius norm
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(1.0) => {
+                // Max absolute column sum
+                let mut max_sum: f64 = 0.0;
+                for j in 0..n {
+                    let col_sum: f64 = (0..m).map(|i| data[[i, j]].abs()).sum();
+                    max_sum = max_sum.max(col_sum);
+                }
+                Ok(max_sum)
+            }
+            Some(p) if p == f64::INFINITY => {
+                // Max absolute row sum
+                let mut max_sum: f64 = 0.0;
+                for i in 0..m {
+                    let row_sum: f64 = (0..n).map(|j| data[[i, j]].abs()).sum();
+                    max_sum = max_sum.max(row_sum);
+                }
+                Ok(max_sum)
+            }
+            Some(p) if p == f64::NEG_INFINITY => {
+                // Min absolute row sum
+                let mut min_sum: f64 = f64::INFINITY;
+                for i in 0..m {
+                    let row_sum: f64 = (0..n).map(|j| data[[i, j]].abs()).sum();
+                    min_sum = min_sum.min(row_sum);
+                }
+                Ok(min_sum)
+            }
+            Some(-1.0) => {
+                // Min absolute column sum
+                let mut min_sum: f64 = f64::INFINITY;
+                for j in 0..n {
+                    let col_sum: f64 = (0..m).map(|i| data[[i, j]].abs()).sum();
+                    min_sum = min_sum.min(col_sum);
+                }
+                Ok(min_sum)
+            }
+            _ => {
+                // Default to Frobenius
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+        };
+    }
+
+    // General case: Frobenius norm
     let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
     Ok(sum_sq.sqrt())
 }
@@ -392,7 +494,8 @@ pub fn cholesky(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// LU decomposition
+/// LU decomposition with partial pivoting
+/// Returns (P, L, U) where PA = LU
 pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
     let data = arr.get_data();
 
@@ -404,18 +507,46 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
     let n = shape[0];
     let m = shape[1];
 
+    // Initialize P as identity, L as zeros (will fill lower triangular), U as copy of A
+    let mut p = vec![0.0; n * n];
+    for i in 0..n {
+        p[i * n + i] = 1.0;
+    }
     let mut l = vec![0.0; n * n];
     let mut u: Vec<Vec<f64>> = (0..n)
         .map(|i| (0..m).map(|j| data[[i, j]]).collect())
         .collect();
 
-    // Initialize L diagonal
-    for i in 0..n {
-        l[i * n + i] = 1.0;
-    }
+    // Track row permutations
+    let mut perm: Vec<usize> = (0..n).collect();
 
     for col in 0..n.min(m) {
-        if u[col][col].abs() < 1e-10 {
+        // Find pivot (largest absolute value in column)
+        let mut max_row = col;
+        let mut max_val = u[col][col].abs();
+        for row in (col + 1)..n {
+            if u[row][col].abs() > max_val {
+                max_row = row;
+                max_val = u[row][col].abs();
+            }
+        }
+
+        // Swap rows in U and track in perm
+        if max_row != col {
+            u.swap(col, max_row);
+            perm.swap(col, max_row);
+            // Also swap L rows (for columns already processed)
+            for j in 0..col {
+                let tmp = l[col * n + j];
+                l[col * n + j] = l[max_row * n + j];
+                l[max_row * n + j] = tmp;
+            }
+        }
+
+        // Set L diagonal
+        l[col * n + col] = 1.0;
+
+        if u[col][col].abs() < 1e-15 {
             continue;
         }
 
@@ -428,9 +559,19 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
         }
     }
 
+    // Build P matrix from permutation
+    let mut p_matrix = vec![0.0; n * n];
+    for i in 0..n {
+        p_matrix[i * n + perm[i]] = 1.0;
+    }
+
     let u_flat: Vec<f64> = u.into_iter().flatten().collect();
 
     let result = RArray::new();
+    // Return (P, L, U)
+    result.push(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[n, n]), p_matrix).unwrap(),
+    )))?;
     result.push(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(IxDyn(&[n, n]), l).unwrap(),
     )))?;
