@@ -73,14 +73,14 @@ impl NDArray {
         )
     }
 
-    /// Get element at index
+    /// Get element at index (supports integers, arrays, ranges, and slicing)
     pub fn get(&self, index: Value) -> Result<Value, Error> {
         let ruby = Ruby::get().unwrap();
         let data = self.data.borrow();
 
         // Handle integer index
         if let Ok(i) = i64::try_convert(index) {
-            let idx = normalize_index(i, data.len())?;
+            let idx = normalize_index(i, data.shape()[0])?;
             if data.ndim() == 1 {
                 return Ok(data[[idx]].into_value_with(&ruby));
             }
@@ -89,8 +89,47 @@ impl NDArray {
             return Ok(Obj::wrap(NDArray::new(slice.to_owned())).into_value_with(&ruby));
         }
 
-        // Handle array of indices
+        // Handle Range (for slicing like arr[1:3] which Ruby represents as arr[1..2] or arr[1...3])
+        if is_range(&ruby, index) {
+            let (start, end, exclusive) = extract_range(&ruby, index)?;
+            let len = data.shape()[0];
+
+            let start_idx = match start {
+                Some(s) => normalize_index(s, len)?,
+                None => 0,
+            };
+            let end_idx = match end {
+                Some(e) => {
+                    let normalized = if e < 0 { (len as i64 + e) as usize } else { e as usize };
+                    if exclusive { normalized } else { (normalized + 1).min(len) }
+                }
+                None => len,
+            };
+
+            if start_idx > end_idx || start_idx >= len {
+                // Return empty array
+                let new_shape = std::iter::once(0)
+                    .chain(data.shape()[1..].iter().cloned())
+                    .collect::<Vec<_>>();
+                return Ok(Obj::wrap(NDArray::new(
+                    ArrayD::from_shape_vec(IxDyn(&new_shape), vec![]).unwrap()
+                )).into_value_with(&ruby));
+            }
+
+            let slice = data.slice_axis(Axis(0), Slice::from(start_idx..end_idx));
+            return Ok(Obj::wrap(NDArray::new(slice.to_owned())).into_value_with(&ruby));
+        }
+
+        // Handle array of indices (for multi-dimensional indexing)
         if let Ok(indices) = RArray::try_convert(index) {
+            // Check if this is advanced slicing (array contains ranges or nil)
+            let has_slicing = indices.into_iter().any(|v| is_range(&ruby, v) || v.is_nil());
+
+            if has_slicing {
+                return self.advanced_slice(&ruby, &data, indices);
+            }
+
+            // Simple integer indexing
             let idx_vec: Vec<usize> = indices
                 .into_iter()
                 .enumerate()
@@ -105,6 +144,103 @@ impl NDArray {
         }
 
         Err(Error::new(exception::type_error(), "Invalid index type"))
+    }
+
+    /// Advanced slicing with ranges and nil (for selecting entire axes)
+    fn advanced_slice(&self, ruby: &Ruby, data: &std::cell::Ref<ArrayD<f64>>, indices: RArray) -> Result<Value, Error> {
+        let ndim = data.ndim();
+        let idx_len = indices.len();
+
+        if idx_len > ndim {
+            return Err(Error::new(exception::index_error(), "too many indices for array"));
+        }
+
+        // Build slice info for each axis
+        let mut slices: Vec<(usize, usize, bool)> = Vec::with_capacity(ndim); // (start, end, is_slice)
+
+        for (axis, v) in indices.into_iter().enumerate() {
+            let axis_len = data.shape()[axis];
+
+            if v.is_nil() {
+                // nil means select all (like : in NumPy)
+                slices.push((0, axis_len, true));
+            } else if is_range(ruby, v) {
+                let (start, end, exclusive) = extract_range(ruby, v)?;
+                let start_idx = match start {
+                    Some(s) => normalize_index(s, axis_len)?,
+                    None => 0,
+                };
+                let end_idx = match end {
+                    Some(e) => {
+                        let normalized = if e < 0 { (axis_len as i64 + e) as usize } else { e as usize };
+                        if exclusive { normalized } else { (normalized + 1).min(axis_len) }
+                    }
+                    None => axis_len,
+                };
+                slices.push((start_idx, end_idx, true));
+            } else if let Ok(i) = i64::try_convert(v) {
+                let idx = normalize_index(i, axis_len)?;
+                slices.push((idx, idx + 1, false)); // Single index, will be squeezed
+            } else {
+                return Err(Error::new(exception::type_error(), "Invalid index type in array"));
+            }
+        }
+
+        // Fill remaining axes with full selection
+        for axis in idx_len..ndim {
+            slices.push((0, data.shape()[axis], true));
+        }
+
+        // Build result shape (excluding squeezed dimensions)
+        let mut result_shape: Vec<usize> = Vec::new();
+        for (axis, &(start, end, is_slice)) in slices.iter().enumerate() {
+            if is_slice {
+                result_shape.push(end - start);
+            }
+            // Single indices are squeezed out
+        }
+
+        // Extract data
+        let mut result_data: Vec<f64> = Vec::new();
+        let shape = data.shape();
+
+        // Recursive extraction
+        fn extract_recursive(
+            data: &ArrayD<f64>,
+            slices: &[(usize, usize, bool)],
+            shape: &[usize],
+            current_idx: &mut Vec<usize>,
+            axis: usize,
+            result: &mut Vec<f64>,
+        ) {
+            if axis == slices.len() {
+                result.push(data[IxDyn(current_idx)]);
+                return;
+            }
+
+            let (start, end, _) = slices[axis];
+            for i in start..end {
+                current_idx.push(i);
+                extract_recursive(data, slices, shape, current_idx, axis + 1, result);
+                current_idx.pop();
+            }
+        }
+
+        let mut current_idx = Vec::new();
+        extract_recursive(&data, &slices, shape, &mut current_idx, 0, &mut result_data);
+
+        if result_shape.is_empty() {
+            // Scalar result
+            if result_data.is_empty() {
+                return Err(Error::new(exception::index_error(), "index out of bounds"));
+            }
+            return Ok(result_data[0].into_value_with(ruby));
+        }
+
+        let result = ArrayD::from_shape_vec(IxDyn(&result_shape), result_data)
+            .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create slice: {}", e)))?;
+
+        Ok(Obj::wrap(NDArray::new(result)).into_value_with(ruby))
     }
 
     /// Set element at index
@@ -336,6 +472,37 @@ fn normalize_index(i: i64, len: usize) -> Result<usize, Error> {
     Ok(idx)
 }
 
+/// Check if a Ruby value is a Range
+fn is_range(ruby: &Ruby, value: Value) -> bool {
+    // Try to call is_a? to check if it's a Range
+    let result: Result<bool, _> = value.funcall("is_a?", (ruby.class_range(),));
+    result.unwrap_or(false)
+}
+
+/// Extract start, end, and exclusive flag from a Ruby Range
+fn extract_range(ruby: &Ruby, value: Value) -> Result<(Option<i64>, Option<i64>, bool), Error> {
+    // Get begin (start)
+    let begin_val: Value = value.funcall("begin", ())?;
+    let start = if begin_val.is_nil() {
+        None
+    } else {
+        Some(i64::try_convert(begin_val)?)
+    };
+
+    // Get end
+    let end_val: Value = value.funcall("end", ())?;
+    let end = if end_val.is_nil() {
+        None
+    } else {
+        Some(i64::try_convert(end_val)?)
+    };
+
+    // Check if exclusive (... vs ..)
+    let exclusive: bool = value.funcall("exclude_end?", ())?;
+
+    Ok((start, end, exclusive))
+}
+
 fn flatten_nested_array(value: Value) -> Result<(Vec<f64>, Vec<usize>), Error> {
     fn recursive_flatten(value: Value, depth: usize, shapes: &mut Vec<usize>) -> Result<Vec<f64>, Error> {
         if let Ok(arr) = RArray::try_convert(value) {
@@ -385,6 +552,40 @@ fn array_to_ruby_nested(ruby: &Ruby, arr: &ArrayD<f64>) -> Result<Value, Error> 
     Ok(result.into_value_with(ruby))
 }
 
+/// Compute broadcast shape from two input shapes (NumPy broadcasting rules)
+fn broadcast_shape(shape1: &[usize], shape2: &[usize]) -> Result<Vec<usize>, Error> {
+    let ndim = shape1.len().max(shape2.len());
+    let mut result = vec![0; ndim];
+
+    for i in 0..ndim {
+        let dim1 = if i < ndim - shape1.len() { 1 } else { shape1[shape1.len() - (ndim - i)] };
+        let dim2 = if i < ndim - shape2.len() { 1 } else { shape2[shape2.len() - (ndim - i)] };
+
+        if dim1 == dim2 {
+            result[i] = dim1;
+        } else if dim1 == 1 {
+            result[i] = dim2;
+        } else if dim2 == 1 {
+            result[i] = dim1;
+        } else {
+            return Err(Error::new(
+                exception::arg_error(),
+                format!("operands could not be broadcast together with shapes {:?} {:?}", shape1, shape2)
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Get the broadcast index for a given output index
+fn broadcast_index(out_idx: &[usize], shape: &[usize], ndim: usize) -> Vec<usize> {
+    let offset = ndim - shape.len();
+    shape.iter().enumerate().map(|(i, &dim)| {
+        if dim == 1 { 0 } else { out_idx[offset + i] }
+    }).collect()
+}
+
 fn binary_op<F>(data: &ArrayD<f64>, other: Value, op: F) -> Result<Obj<NDArray>, Error>
 where
     F: Fn(f64, f64) -> f64,
@@ -409,9 +610,36 @@ where
             return Ok(Obj::wrap(NDArray::new(result)));
         }
 
-        // Broadcasting (simplified - only handles common cases)
-        // TODO: Full numpy-style broadcasting
-        return Err(Error::new(exception::arg_error(), "Shape mismatch (broadcasting not fully implemented)"));
+        // NumPy-style broadcasting
+        let out_shape = broadcast_shape(data.shape(), other_data.shape())?;
+        let out_ndim = out_shape.len();
+        let out_size: usize = out_shape.iter().product();
+
+        let mut result_data = Vec::with_capacity(out_size);
+
+        // Iterate over all output indices
+        let mut out_idx = vec![0usize; out_ndim];
+        for _ in 0..out_size {
+            let idx1 = broadcast_index(&out_idx, data.shape(), out_ndim);
+            let idx2 = broadcast_index(&out_idx, other_data.shape(), out_ndim);
+
+            let val1 = data[IxDyn(&idx1)];
+            let val2 = other_data[IxDyn(&idx2)];
+            result_data.push(op(val1, val2));
+
+            // Increment output index
+            for d in (0..out_ndim).rev() {
+                out_idx[d] += 1;
+                if out_idx[d] < out_shape[d] {
+                    break;
+                }
+                out_idx[d] = 0;
+            }
+        }
+
+        let result = ArrayD::from_shape_vec(IxDyn(&out_shape), result_data)
+            .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create result: {}", e)))?;
+        return Ok(Obj::wrap(NDArray::new(result)));
     }
 
     Err(Error::new(exception::type_error(), "Operand must be numeric or NDArray"))
@@ -460,9 +688,9 @@ pub fn vstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
 pub fn hstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
     // NumPy hstack: concatenate along axis 1 for 2D+, axis 0 for 1D
     // Check first array's dimensions
-    let first: &NDArray = arrays.entry(0)
-        .map_err(|_| Error::new(exception::arg_error(), "Need at least one array"))?
-        .try_convert()
+    let first_val = arrays.entry::<Value>(0)
+        .map_err(|_| Error::new(exception::arg_error(), "Need at least one array"))?;
+    let first: &NDArray = <&NDArray>::try_convert(first_val)
         .map_err(|_| Error::new(exception::type_error(), "Expected NDArray"))?;
 
     if first.get_data().ndim() == 1 {

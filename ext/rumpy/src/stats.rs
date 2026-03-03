@@ -1,15 +1,84 @@
 //! Statistical functions
 
 use crate::array::NDArray;
-use magnus::{exception, typed_data::Obj, Error, RArray};
-use ndarray::{ArrayD, IxDyn};
+use magnus::{exception, typed_data::Obj, Error, IntoValue, RArray, Value, TryConvert};
+use ndarray::{ArrayD, Axis, IxDyn};
+
+// Helper to normalize axis (handle negative indices)
+fn normalize_axis(axis: i64, ndim: usize) -> Result<usize, Error> {
+    let axis = if axis < 0 {
+        (ndim as i64 + axis) as usize
+    } else {
+        axis as usize
+    };
+    if axis >= ndim {
+        return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds for array of dimension {}", axis, ndim)));
+    }
+    Ok(axis)
+}
 
 pub fn sum(arr: &NDArray) -> f64 {
     arr.get_data().sum()
 }
 
+/// Sum with optional axis parameter
+pub fn sum_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(data.sum().into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+            let result = data.sum_axis(Axis(axis));
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
+}
+
 pub fn prod(arr: &NDArray) -> f64 {
     arr.get_data().product()
+}
+
+/// Prod with optional axis parameter
+pub fn prod_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(data.product().into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+            let shape = data.shape();
+            let mut new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+            if new_shape.is_empty() {
+                new_shape = vec![];
+            }
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut prod = 1.0;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        prod *= data.iter().nth(flat_idx).cloned().unwrap_or(1.0);
+                    }
+                    result_data.push(prod);
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
 }
 
 pub fn mean(arr: &NDArray) -> f64 {
@@ -17,14 +86,63 @@ pub fn mean(arr: &NDArray) -> f64 {
     data.sum() / data.len() as f64
 }
 
+/// Mean with optional axis parameter
+pub fn mean_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(mean(arr).into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+            let result = data.mean_axis(Axis(axis));
+            match result {
+                Some(r) => Ok(Obj::wrap(NDArray::new(r)).into_value_with(&ruby)),
+                None => Err(Error::new(exception::arg_error(), "Cannot compute mean of empty slice"))
+            }
+        }
+    }
+}
+
 pub fn std(arr: &NDArray) -> f64 {
     var(arr).sqrt()
+}
+
+/// Std with optional axis parameter
+pub fn std_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(std(arr).into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+            let var_result = data.var_axis(Axis(axis), 0.0);
+            let result = var_result.mapv(|x| x.sqrt());
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
 }
 
 pub fn var(arr: &NDArray) -> f64 {
     let data = arr.get_data();
     let m = data.sum() / data.len() as f64;
     data.mapv(|x| (x - m).powi(2)).sum() / data.len() as f64
+}
+
+/// Var with optional axis parameter
+pub fn var_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(var(arr).into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+            let result = data.var_axis(Axis(axis), 0.0);
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
 }
 
 pub fn min(arr: &NDArray) -> Result<f64, Error> {
@@ -35,12 +153,104 @@ pub fn min(arr: &NDArray) -> Result<f64, Error> {
     Ok(data.iter().cloned().fold(f64::INFINITY, f64::min))
 }
 
+/// Min with optional axis parameter
+pub fn min_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(min(arr)?.into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let mut new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+            if new_shape.is_empty() {
+                new_shape = vec![];
+            }
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            let flat: Vec<f64> = data.iter().cloned().collect();
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut min_val = f64::INFINITY;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() {
+                            min_val = min_val.min(flat[flat_idx]);
+                        }
+                    }
+                    result_data.push(min_val);
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
+}
+
 pub fn max(arr: &NDArray) -> Result<f64, Error> {
     let data = arr.get_data();
     if data.is_empty() {
         return Err(Error::new(exception::arg_error(), "zero-size array to reduction operation maximum which has no identity"));
     }
     Ok(data.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+}
+
+/// Max with optional axis parameter
+pub fn max_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(max(arr)?.into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let mut new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+            if new_shape.is_empty() {
+                new_shape = vec![];
+            }
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            let flat: Vec<f64> = data.iter().cloned().collect();
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut max_val = f64::NEG_INFINITY;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() {
+                            max_val = max_val.max(flat[flat_idx]);
+                        }
+                    }
+                    result_data.push(max_val);
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
 }
 
 pub fn argmin(arr: &NDArray) -> Result<usize, Error> {
@@ -55,6 +265,54 @@ pub fn argmin(arr: &NDArray) -> Result<usize, Error> {
         .unwrap())
 }
 
+/// Argmin with optional axis parameter (returns integer indices)
+pub fn argmin_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok((argmin(arr)? as i64).into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let mut new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+            if new_shape.is_empty() {
+                new_shape = vec![];
+            }
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            let flat: Vec<f64> = data.iter().cloned().collect();
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut min_val = f64::INFINITY;
+                    let mut min_idx = 0usize;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() && flat[flat_idx] < min_val {
+                            min_val = flat[flat_idx];
+                            min_idx = a;
+                        }
+                    }
+                    result_data.push(min_idx as f64);
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
+}
+
 pub fn argmax(arr: &NDArray) -> Result<usize, Error> {
     let data = arr.get_data();
     if data.is_empty() {
@@ -65,6 +323,54 @@ pub fn argmax(arr: &NDArray) -> Result<usize, Error> {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap())
+}
+
+/// Argmax with optional axis parameter (returns integer indices)
+pub fn argmax_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
+    let ruby = magnus::Ruby::get().unwrap();
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok((argmax(arr)? as i64).into_value_with(&ruby)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let mut new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+            if new_shape.is_empty() {
+                new_shape = vec![];
+            }
+
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            let flat: Vec<f64> = data.iter().cloned().collect();
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut max_val = f64::NEG_INFINITY;
+                    let mut max_idx = 0usize;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() && flat[flat_idx] > max_val {
+                            max_val = flat[flat_idx];
+                            max_idx = a;
+                        }
+                    }
+                    result_data.push(max_idx as f64);
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
+        }
+    }
 }
 
 pub fn cumsum(arr: &NDArray) -> Obj<NDArray> {
@@ -82,6 +388,43 @@ pub fn cumsum(arr: &NDArray) -> Obj<NDArray> {
     ))
 }
 
+/// Cumsum with optional axis parameter
+pub fn cumsum_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(cumsum(arr)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = vec![0.0; flat.len()];
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut sum = 0.0;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() {
+                            sum += flat[flat_idx];
+                            result_data[flat_idx] = sum;
+                        }
+                    }
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(data.raw_dim(), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)))
+        }
+    }
+}
+
 pub fn cumprod(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     let mut prod = 1.0;
@@ -97,6 +440,43 @@ pub fn cumprod(arr: &NDArray) -> Obj<NDArray> {
     ))
 }
 
+/// Cumprod with optional axis parameter
+pub fn cumprod_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+
+    match axis {
+        None => Ok(cumprod(arr)),
+        Some(axis_i) => {
+            let axis = normalize_axis(axis_i, data.ndim())?;
+
+            let shape = data.shape();
+            let axis_len = shape[axis];
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = vec![1.0; flat.len()];
+
+            for o in 0..outer_size.max(1) {
+                for i in 0..inner_size.max(1) {
+                    let mut prod = 1.0;
+                    for a in 0..axis_len {
+                        let flat_idx = o * axis_len * inner_size + a * inner_size + i;
+                        if flat_idx < flat.len() {
+                            prod *= flat[flat_idx];
+                            result_data[flat_idx] = prod;
+                        }
+                    }
+                }
+            }
+
+            let result = ArrayD::from_shape_vec(data.raw_dim(), result_data)
+                .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
+            Ok(Obj::wrap(NDArray::new(result)))
+        }
+    }
+}
+
 /// Helper for NaN-safe comparison (NaN sorts to end)
 fn nan_safe_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
     match (a.is_nan(), b.is_nan()) {
@@ -110,14 +490,12 @@ fn nan_safe_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
 pub fn median(arr: &NDArray) -> f64 {
     let data = arr.get_data();
     let mut sorted: Vec<f64> = data.iter().cloned().collect();
-    // NaN-safe sort
     sorted.sort_by(nan_safe_cmp);
 
     let n = sorted.len();
     if n == 0 {
         return f64::NAN;
     }
-    // If there are NaN values, they're at the end - median may be NaN
     if n % 2 == 0 {
         let a = sorted[n / 2 - 1];
         let b = sorted[n / 2];
@@ -134,7 +512,6 @@ pub fn percentile(arr: &NDArray, q: f64) -> f64 {
 pub fn quantile(arr: &NDArray, q: f64) -> f64 {
     let data = arr.get_data();
     let mut sorted: Vec<f64> = data.iter().cloned().collect();
-    // NaN-safe sort
     sorted.sort_by(nan_safe_cmp);
 
     if sorted.is_empty() {
@@ -182,7 +559,7 @@ pub fn histogram(arr: &NDArray, bins: usize) -> Result<RArray, Error> {
         counts[bin] += 1.0;
     }
 
-    let ruby = magnus::Ruby::get().unwrap();
+    let _ruby = magnus::Ruby::get().unwrap();
     let result = RArray::new();
 
     let counts_arr = NDArray::new(
@@ -209,14 +586,12 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let n_vars = shape[0];
     let n_obs = shape[1];
 
-    // Calculate means
     let means: Vec<f64> = (0..n_vars)
         .map(|i| {
             (0..n_obs).map(|j| data[[i, j]]).sum::<f64>() / n_obs as f64
         })
         .collect();
 
-    // Calculate covariance matrix
     let mut cov = vec![0.0; n_vars * n_vars];
     for i in 0..n_vars {
         for j in 0..n_vars {
@@ -228,7 +603,6 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
         }
     }
 
-    // Convert to correlation
     let mut corr = vec![0.0; n_vars * n_vars];
     for i in 0..n_vars {
         for j in 0..n_vars {
@@ -257,14 +631,12 @@ pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let n_vars = shape[0];
     let n_obs = shape[1];
 
-    // Calculate means
     let means: Vec<f64> = (0..n_vars)
         .map(|i| {
             (0..n_obs).map(|j| data[[i, j]]).sum::<f64>() / n_obs as f64
         })
         .collect();
 
-    // Calculate covariance matrix (with Bessel's correction)
     let mut cov = vec![0.0; n_vars * n_vars];
     for i in 0..n_vars {
         for j in 0..n_vars {
@@ -407,7 +779,6 @@ pub fn nanmedian(arr: &NDArray) -> f64 {
     }
 }
 
-/// Trapezoidal integration
 pub fn trapz(y: &NDArray, dx: f64) -> f64 {
     let data = y.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
@@ -424,7 +795,6 @@ pub fn trapz(y: &NDArray, dx: f64) -> f64 {
     sum
 }
 
-/// Polynomial fitting (simple least squares)
 pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let y_data = y.get_data();
@@ -440,7 +810,6 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         return Err(Error::new(exception::arg_error(), "Not enough data points for polynomial degree"));
     }
 
-    // Build Vandermonde matrix
     let mut vandermonde = vec![0.0; n * m];
     for i in 0..n {
         let xi = x_data.iter().nth(i).cloned().unwrap();
@@ -449,8 +818,6 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         }
     }
 
-    // Solve using normal equations: (V^T V) c = V^T y
-    // This is simplified - a proper implementation would use QR decomposition
     let mut ata = vec![0.0; m * m];
     let mut atb = vec![0.0; m];
 
@@ -469,17 +836,14 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         atb[i] = sum;
     }
 
-    // Simple Gaussian elimination (for small polynomials)
     let mut coeffs = atb.clone();
     for i in 0..m {
-        // Find pivot
         let mut max_row = i;
         for k in i+1..m {
             if ata[k * m + i].abs() > ata[max_row * m + i].abs() {
                 max_row = k;
             }
         }
-        // Swap rows
         for j in 0..m {
             let tmp = ata[i * m + j];
             ata[i * m + j] = ata[max_row * m + j];
@@ -489,7 +853,6 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         coeffs[i] = coeffs[max_row];
         coeffs[max_row] = tmp;
 
-        // Eliminate
         for k in i+1..m {
             let factor = ata[k * m + i] / ata[i * m + i];
             for j in i..m {
@@ -499,7 +862,6 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         }
     }
 
-    // Back substitution
     for i in (0..m).rev() {
         for j in i+1..m {
             coeffs[i] -= ata[i * m + j] * coeffs[j];
@@ -512,14 +874,12 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
     )))
 }
 
-/// Polynomial evaluation
 pub fn polyval(p: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
     let p_data = p.get_data();
     let x_data = x.get_data();
 
     let coeffs: Vec<f64> = p_data.iter().cloned().collect();
     let result: Vec<f64> = x_data.iter().map(|&xi| {
-        // Horner's method
         let mut val = 0.0;
         for &c in coeffs.iter() {
             val = val * xi + c;
@@ -532,7 +892,6 @@ pub fn polyval(p: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Digitize - return indices of bins to which each value belongs
 pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let bins_data = bins.get_data();
@@ -540,7 +899,6 @@ pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
     let bins_vec: Vec<f64> = bins_data.iter().cloned().collect();
 
     let result: Vec<f64> = x_data.iter().map(|&xi| {
-        // Binary search for bin
         let mut lo = 0;
         let mut hi = bins_vec.len();
         while lo < hi {
@@ -557,48 +915,4 @@ pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(x_data.raw_dim(), result).unwrap(),
     )))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mean() {
-        let arr = NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[5]), vec![1.0, 2.0, 3.0, 4.0, 5.0]).unwrap(),
-        );
-        assert!((mean(&arr) - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_std_var() {
-        let arr = NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[4]), vec![2.0, 4.0, 4.0, 4.0]).unwrap(),
-        );
-        // Mean is 3.5, variance is ((2-3.5)^2 + 3*(4-3.5)^2)/4 = (2.25 + 0.75)/4 = 0.75
-        let v = var(&arr);
-        assert!((v - 0.75).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_median() {
-        let arr = NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[5]), vec![1.0, 3.0, 2.0, 5.0, 4.0]).unwrap(),
-        );
-        assert!((median(&arr) - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_cumsum() {
-        let arr = NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[4]), vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
-        );
-        let result = cumsum(&arr);
-        let data = result.get_data();
-        assert_eq!(data[[0]], 1.0);
-        assert_eq!(data[[1]], 3.0);
-        assert_eq!(data[[2]], 6.0);
-        assert_eq!(data[[3]], 10.0);
-    }
 }

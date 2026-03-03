@@ -121,7 +121,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("cross", function!(math::cross, 2))?;
     rumpy.define_singleton_method("tensordot", function!(math::tensordot, 3))?;
 
-    // Aggregation on module
+    // Aggregation on module (original single-arg versions for backwards compatibility)
     rumpy.define_singleton_method("sum", function!(stats::sum, 1))?;
     rumpy.define_singleton_method("prod", function!(stats::prod, 1))?;
     rumpy.define_singleton_method("mean", function!(stats::mean, 1))?;
@@ -133,6 +133,18 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("argmax", function!(stats::argmax, 1))?;
     rumpy.define_singleton_method("cumsum", function!(stats::cumsum, 1))?;
     rumpy.define_singleton_method("cumprod", function!(stats::cumprod, 1))?;
+    // Aggregation with axis parameter
+    rumpy.define_singleton_method("sum_axis", function!(stats::sum_axis, 2))?;
+    rumpy.define_singleton_method("prod_axis", function!(stats::prod_axis, 2))?;
+    rumpy.define_singleton_method("mean_axis", function!(stats::mean_axis, 2))?;
+    rumpy.define_singleton_method("std_axis", function!(stats::std_axis, 2))?;
+    rumpy.define_singleton_method("var_axis", function!(stats::var_axis, 2))?;
+    rumpy.define_singleton_method("min_axis", function!(stats::min_axis, 2))?;
+    rumpy.define_singleton_method("max_axis", function!(stats::max_axis, 2))?;
+    rumpy.define_singleton_method("argmin_axis", function!(stats::argmin_axis, 2))?;
+    rumpy.define_singleton_method("argmax_axis", function!(stats::argmax_axis, 2))?;
+    rumpy.define_singleton_method("cumsum_axis", function!(stats::cumsum_axis, 2))?;
+    rumpy.define_singleton_method("cumprod_axis", function!(stats::cumprod_axis, 2))?;
     rumpy.define_singleton_method("median", function!(stats::median, 1))?;
     // NaN-ignoring aggregations
     rumpy.define_singleton_method("nansum", function!(stats::nansum, 1))?;
