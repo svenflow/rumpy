@@ -88,9 +88,17 @@ pub fn abs(arr: &NDArray) -> Obj<NDArray> {
 
 pub fn sign(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
-    // NumPy's sign returns 0.0 for 0.0, unlike Rust's signum which returns 1.0
+    // NumPy's sign: returns sign of number, preserving -0.0
+    // sign(NaN) = NaN, sign(-0.0) = -0.0, sign(0.0) = 0.0
     Obj::wrap(NDArray::new(data.mapv(|x| {
-        if x == 0.0 { 0.0 } else { x.signum() }
+        if x.is_nan() {
+            f64::NAN
+        } else if x == 0.0 {
+            // Preserve sign of zero: -0.0 stays -0.0, 0.0 stays 0.0
+            x
+        } else {
+            x.signum()
+        }
     })))
 }
 
@@ -109,9 +117,281 @@ pub fn round(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x.round())))
 }
 
-pub fn clip(arr: &NDArray, min_val: f64, max_val: f64) -> Obj<NDArray> {
+// Numerical stability functions (MODERATE audit issues)
+
+pub fn expm1(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
-    Obj::wrap(NDArray::new(data.mapv(|x| x.max(min_val).min(max_val))))
+    Obj::wrap(NDArray::new(data.mapv(|x| x.exp_m1())))
+}
+
+pub fn log1p(arr: &NDArray) -> Obj<NDArray> {
+    let data = arr.get_data();
+    Obj::wrap(NDArray::new(data.mapv(|x| x.ln_1p())))
+}
+
+pub fn rint(arr: &NDArray) -> Obj<NDArray> {
+    // Banker's rounding (round to nearest even)
+    let data = arr.get_data();
+    Obj::wrap(NDArray::new(data.mapv(|x| {
+        let floored = x.floor();
+        let frac = x - floored;
+        if frac == 0.5 {
+            // Round to even
+            if floored as i64 % 2 == 0 {
+                floored
+            } else {
+                floored + 1.0
+            }
+        } else {
+            x.round()
+        }
+    })))
+}
+
+pub fn arctan2(y: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let y_data = y.get_data();
+    let x_data = x.get_data();
+
+    if y_data.shape() != x_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    let result = ndarray::Zip::from(&*y_data)
+        .and(&*x_data)
+        .map_collect(|&y_val, &x_val| y_val.atan2(x_val));
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn deg2rad(arr: &NDArray) -> Obj<NDArray> {
+    let data = arr.get_data();
+    Obj::wrap(NDArray::new(data.mapv(|x| x.to_radians())))
+}
+
+pub fn rad2deg(arr: &NDArray) -> Obj<NDArray> {
+    let data = arr.get_data();
+    Obj::wrap(NDArray::new(data.mapv(|x| x.to_degrees())))
+}
+
+pub fn hypot(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    if x_data.shape() != y_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    let result = ndarray::Zip::from(&*x_data)
+        .and(&*y_data)
+        .map_collect(|&x_val, &y_val| x_val.hypot(y_val));
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn diff(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+    let flat: Vec<f64> = data.iter().cloned().collect();
+
+    if flat.len() < 2 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    }
+
+    let result: Vec<f64> = flat.windows(2).map(|w| w[1] - w[0]).collect();
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[result.len()]), result).unwrap(),
+    )))
+}
+
+pub fn gradient(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let n = flat.len();
+
+    if n == 0 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    }
+    if n == 1 {
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[1]), vec![0.0]).unwrap(),
+        )));
+    }
+
+    let mut result = vec![0.0; n];
+
+    // First element: forward difference
+    result[0] = flat[1] - flat[0];
+
+    // Interior elements: central difference
+    for i in 1..n-1 {
+        result[i] = (flat[i+1] - flat[i-1]) / 2.0;
+    }
+
+    // Last element: backward difference
+    result[n-1] = flat[n-1] - flat[n-2];
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(data.raw_dim(), result).unwrap(),
+    )))
+}
+
+// Modulo/remainder operations
+
+pub fn mod_fn(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    if x_data.shape() != y_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // NumPy mod: same sign as divisor
+    let result = ndarray::Zip::from(&*x_data)
+        .and(&*y_data)
+        .map_collect(|&x_val, &y_val| {
+            let r = x_val % y_val;
+            if r != 0.0 && (r < 0.0) != (y_val < 0.0) {
+                r + y_val
+            } else {
+                r
+            }
+        });
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn fmod(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    if x_data.shape() != y_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // C-style fmod: same sign as dividend
+    let result = ndarray::Zip::from(&*x_data)
+        .and(&*y_data)
+        .map_collect(|&x_val, &y_val| x_val % y_val);
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn remainder(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
+    // remainder is same as mod in NumPy
+    mod_fn(x, y)
+}
+
+// Maximum/minimum with NaN handling (fmax/fmin ignore NaN)
+
+pub fn maximum(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // maximum propagates NaN
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&x, &y| {
+            if x.is_nan() || y.is_nan() {
+                f64::NAN
+            } else {
+                x.max(y)
+            }
+        });
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn minimum(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // minimum propagates NaN
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&x, &y| {
+            if x.is_nan() || y.is_nan() {
+                f64::NAN
+            } else {
+                x.min(y)
+            }
+        });
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn fmax(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // fmax ignores NaN
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&x, &y| {
+            if x.is_nan() { y }
+            else if y.is_nan() { x }
+            else { x.max(y) }
+        });
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn fmin(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    }
+
+    // fmin ignores NaN
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&x, &y| {
+            if x.is_nan() { y }
+            else if y.is_nan() { x }
+            else { x.min(y) }
+        });
+
+    Ok(Obj::wrap(NDArray::new(result)))
+}
+
+pub fn clip(arr: &NDArray, min_val: f64, max_val: f64) -> Result<Obj<NDArray>, Error> {
+    // NumPy semantics for clip with NaN bounds:
+    // - NaN min: only apply max bound
+    // - NaN max: only apply min bound
+    // - Both NaN: return copy of input
+    // - min > max: ValueError in NumPy (we'll allow but clamp to empty range)
+    let data = arr.get_data();
+
+    let min_is_nan = min_val.is_nan();
+    let max_is_nan = max_val.is_nan();
+
+    let result = data.mapv(|x| {
+        if x.is_nan() {
+            x
+        } else if min_is_nan && max_is_nan {
+            x
+        } else if min_is_nan {
+            x.min(max_val)
+        } else if max_is_nan {
+            x.max(min_val)
+        } else {
+            x.max(min_val).min(max_val)
+        }
+    });
+
+    Ok(Obj::wrap(NDArray::new(result)))
 }
 
 pub fn square(arr: &NDArray) -> Obj<NDArray> {

@@ -263,30 +263,44 @@ impl NDArray {
         data.mapv(|x| (x - mean).powi(2)).sum() / data.len() as f64
     }
 
-    pub fn min(&self) -> f64 {
-        self.data.borrow().iter().cloned().fold(f64::INFINITY, f64::min)
-    }
-
-    pub fn max(&self) -> f64 {
-        self.data.borrow().iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-    }
-
-    pub fn argmin(&self) -> usize {
+    pub fn min(&self) -> Result<f64, Error> {
         let data = self.data.borrow();
-        data.iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+        if data.is_empty() {
+            return Err(Error::new(exception::arg_error(), "zero-size array to reduction operation minimum which has no identity"));
+        }
+        Ok(data.iter().cloned().fold(f64::INFINITY, f64::min))
     }
 
-    pub fn argmax(&self) -> usize {
+    pub fn max(&self) -> Result<f64, Error> {
         let data = self.data.borrow();
-        data.iter()
+        if data.is_empty() {
+            return Err(Error::new(exception::arg_error(), "zero-size array to reduction operation maximum which has no identity"));
+        }
+        Ok(data.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+    }
+
+    pub fn argmin(&self) -> Result<usize, Error> {
+        let data = self.data.borrow();
+        if data.is_empty() {
+            return Err(Error::new(exception::arg_error(), "attempt to get argmin of an empty sequence"));
+        }
+        Ok(data.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
-            .unwrap_or(0)
+            .unwrap())
+    }
+
+    pub fn argmax(&self) -> Result<usize, Error> {
+        let data = self.data.borrow();
+        if data.is_empty() {
+            return Err(Error::new(exception::arg_error(), "attempt to get argmax of an empty sequence"));
+        }
+        Ok(data.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap())
     }
 
     pub fn all(&self) -> bool {

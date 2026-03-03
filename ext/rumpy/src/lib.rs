@@ -28,6 +28,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("arange", function!(creation::arange, 3))?;
     rumpy.define_singleton_method("linspace", function!(creation::linspace, 3))?;
     rumpy.define_singleton_method("logspace", function!(creation::logspace, 3))?;
+    rumpy.define_singleton_method("geomspace", function!(creation::geomspace, 3))?;
     rumpy.define_singleton_method("eye", function!(creation::eye, 1))?;
     rumpy.define_singleton_method("identity", function!(creation::identity, 1))?;
     rumpy.define_singleton_method("diag", function!(creation::diag, 1))?;
@@ -94,6 +95,22 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("power", function!(math::power, 2))?;
     rumpy.define_singleton_method("square", function!(math::square, 1))?;
     rumpy.define_singleton_method("reciprocal", function!(math::reciprocal, 1))?;
+    rumpy.define_singleton_method("expm1", function!(math::expm1, 1))?;
+    rumpy.define_singleton_method("log1p", function!(math::log1p, 1))?;
+    rumpy.define_singleton_method("rint", function!(math::rint, 1))?;
+    rumpy.define_singleton_method("arctan2", function!(math::arctan2, 2))?;
+    rumpy.define_singleton_method("deg2rad", function!(math::deg2rad, 1))?;
+    rumpy.define_singleton_method("rad2deg", function!(math::rad2deg, 1))?;
+    rumpy.define_singleton_method("hypot", function!(math::hypot, 2))?;
+    rumpy.define_singleton_method("diff", function!(math::diff, 1))?;
+    rumpy.define_singleton_method("gradient", function!(math::gradient, 1))?;
+    rumpy.define_singleton_method("mod", function!(math::mod_fn, 2))?;
+    rumpy.define_singleton_method("fmod", function!(math::fmod, 2))?;
+    rumpy.define_singleton_method("remainder", function!(math::remainder, 2))?;
+    rumpy.define_singleton_method("maximum", function!(math::maximum, 2))?;
+    rumpy.define_singleton_method("minimum", function!(math::minimum, 2))?;
+    rumpy.define_singleton_method("fmax", function!(math::fmax, 2))?;
+    rumpy.define_singleton_method("fmin", function!(math::fmin, 2))?;
 
     // Array operations
     rumpy.define_singleton_method("dot", function!(math::dot, 2))?;

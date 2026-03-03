@@ -27,30 +27,44 @@ pub fn var(arr: &NDArray) -> f64 {
     data.mapv(|x| (x - m).powi(2)).sum() / data.len() as f64
 }
 
-pub fn min(arr: &NDArray) -> f64 {
-    arr.get_data().iter().cloned().fold(f64::INFINITY, f64::min)
-}
-
-pub fn max(arr: &NDArray) -> f64 {
-    arr.get_data().iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-}
-
-pub fn argmin(arr: &NDArray) -> usize {
+pub fn min(arr: &NDArray) -> Result<f64, Error> {
     let data = arr.get_data();
-    data.iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+    if data.is_empty() {
+        return Err(Error::new(exception::arg_error(), "zero-size array to reduction operation minimum which has no identity"));
+    }
+    Ok(data.iter().cloned().fold(f64::INFINITY, f64::min))
 }
 
-pub fn argmax(arr: &NDArray) -> usize {
+pub fn max(arr: &NDArray) -> Result<f64, Error> {
     let data = arr.get_data();
-    data.iter()
+    if data.is_empty() {
+        return Err(Error::new(exception::arg_error(), "zero-size array to reduction operation maximum which has no identity"));
+    }
+    Ok(data.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+}
+
+pub fn argmin(arr: &NDArray) -> Result<usize, Error> {
+    let data = arr.get_data();
+    if data.is_empty() {
+        return Err(Error::new(exception::arg_error(), "attempt to get argmin of an empty sequence"));
+    }
+    Ok(data.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
-        .unwrap_or(0)
+        .unwrap())
+}
+
+pub fn argmax(arr: &NDArray) -> Result<usize, Error> {
+    let data = arr.get_data();
+    if data.is_empty() {
+        return Err(Error::new(exception::arg_error(), "attempt to get argmax of an empty sequence"));
+    }
+    Ok(data.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap())
 }
 
 pub fn cumsum(arr: &NDArray) -> Obj<NDArray> {

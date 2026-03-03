@@ -114,6 +114,39 @@ pub fn logspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error
     Ok(Obj::wrap(NDArray::new(arr)))
 }
 
+/// Create numbers spaced evenly on a geometric scale
+pub fn geomspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error> {
+    if start == 0.0 || stop == 0.0 {
+        return Err(Error::new(exception::arg_error(), "Geometric sequence cannot include zero"));
+    }
+    if (start < 0.0) != (stop < 0.0) {
+        return Err(Error::new(exception::arg_error(), "Geometric sequence cannot include sign change"));
+    }
+
+    if num == 0 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    }
+    if num == 1 {
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[1]), vec![start]).unwrap(),
+        )));
+    }
+
+    // Use logarithmic spacing
+    let log_start = start.abs().ln();
+    let log_stop = stop.abs().ln();
+    let sign = if start < 0.0 { -1.0 } else { 1.0 };
+
+    let log_step = (log_stop - log_start) / (num - 1) as f64;
+    let values: Vec<f64> = (0..num)
+        .map(|i| sign * (log_start + log_step * i as f64).exp())
+        .collect();
+
+    let arr = ArrayD::from_shape_vec(IxDyn(&[num]), values)
+        .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
+    Ok(Obj::wrap(NDArray::new(arr)))
+}
+
 /// Create an identity matrix
 pub fn eye(n: usize) -> Result<Obj<NDArray>, Error> {
     let mut data = vec![0.0; n * n];
