@@ -240,9 +240,9 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
             break;
         }
 
-        // Find pivot
+        // Find pivot using consistent tolerance (1e-14) across linalg functions
         let mut pivot_row = row;
-        while pivot_row < m && a[pivot_row][col].abs() < 1e-10 {
+        while pivot_row < m && a[pivot_row][col].abs() < 1e-14 {
             pivot_row += 1;
         }
 
@@ -255,7 +255,7 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
 
         // Eliminate below
         for i in (row + 1)..m {
-            if a[row][col].abs() > 1e-10 {
+            if a[row][col].abs() > 1e-14 {
                 let factor = a[i][col] / a[row][col];
                 for j in col..n {
                     a[i][j] -= factor * a[row][j];
@@ -582,8 +582,16 @@ pub fn cholesky(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// LU decomposition with partial pivoting
-/// Returns (P, L, U) where PA = LU
+/// LU decomposition with partial pivoting.
+///
+/// Returns (P, L, U) where PA = LU:
+/// - P is the permutation matrix (n x n)
+/// - L is lower triangular with ones on diagonal (n x n)
+/// - U is upper triangular (n x m)
+///
+/// # P Matrix Construction
+/// The permutation matrix P is constructed such that P[i, perm[i]] = 1,
+/// where perm tracks the row swaps during elimination. This satisfies PA = LU.
 pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
     let data = arr.get_data();
 

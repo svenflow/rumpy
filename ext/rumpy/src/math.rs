@@ -1,4 +1,21 @@
-//! Mathematical functions
+//! Mathematical functions.
+//!
+//! # Behavior Differences from NumPy
+//!
+//! ## Rounding
+//! - `round()` and `rint()`: Both use banker's rounding (round half to even),
+//!   matching NumPy's behavior. Rust's f64::round() uses round half away from zero,
+//!   which differs from NumPy.
+//!
+//! ## Domain Errors
+//! - `arcsin`, `arccos`: Values outside [-1, 1] return NaN (no error raised)
+//! - `log`, `sqrt`: Negative values return NaN for real-valued operations
+//!
+//! ## Division by Zero
+//! - `reciprocal`: Division by zero returns infinity (positive or negative)
+//!
+//! ## Broadcasting
+//! Binary functions (`arctan2`, `hypot`, `add`, etc.) support NumPy-style broadcasting.
 
 use crate::array::NDArray;
 use magnus::{exception, typed_data::Obj, Error, TryConvert, Value};
@@ -21,11 +38,25 @@ pub fn tan(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x.tan())))
 }
 
+/// Compute the inverse sine (arcsin) of each element.
+///
+/// # Domain
+/// Input values must be in the range [-1, 1]. Values outside this range
+/// will return NaN (following IEEE 754 behavior for invalid operations).
+/// This matches NumPy's behavior where out-of-domain values produce NaN
+/// without raising an error.
 pub fn arcsin(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     Obj::wrap(NDArray::new(data.mapv(|x| x.asin())))
 }
 
+/// Compute the inverse cosine (arccos) of each element.
+///
+/// # Domain
+/// Input values must be in the range [-1, 1]. Values outside this range
+/// will return NaN (following IEEE 754 behavior for invalid operations).
+/// This matches NumPy's behavior where out-of-domain values produce NaN
+/// without raising an error.
 pub fn arccos(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     Obj::wrap(NDArray::new(data.mapv(|x| x.acos())))
@@ -112,9 +143,33 @@ pub fn ceil(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x.ceil())))
 }
 
+/// Round to nearest integer using banker's rounding (round half to even).
+///
+/// This matches NumPy's np.round() behavior which uses banker's rounding
+/// (round half to even) for tie-breaking. For example:
+/// - round(0.5) = 0 (rounds to even)
+/// - round(1.5) = 2 (rounds to even)
+/// - round(2.5) = 2 (rounds to even)
+///
+/// Note: This differs from Rust's f64::round() which uses round half away from zero.
 pub fn round(arr: &NDArray) -> Obj<NDArray> {
+    // Use banker's rounding (round to nearest even) to match NumPy
     let data = arr.get_data();
-    Obj::wrap(NDArray::new(data.mapv(|x| x.round())))
+    Obj::wrap(NDArray::new(data.mapv(|x| {
+        let floored = x.floor();
+        let frac = x - floored;
+        // Use tolerance check for floating-point precision
+        if (frac - 0.5).abs() < 1e-9 {
+            // Round to even
+            if floored as i64 % 2 == 0 {
+                floored
+            } else {
+                floored + 1.0
+            }
+        } else {
+            x.round()
+        }
+    })))
 }
 
 // Numerical stability functions (MODERATE audit issues)
@@ -154,18 +209,49 @@ pub fn rint(arr: &NDArray) -> Obj<NDArray> {
     })))
 }
 
+/// Compute the element-wise arc tangent of y/x, choosing the quadrant correctly.
+///
+/// Supports NumPy-style broadcasting: y and x are broadcast together to a common shape.
 pub fn arctan2(y: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
     let y_data = y.get_data();
     let x_data = x.get_data();
 
-    if y_data.shape() != x_data.shape() {
-        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    // Simple case: same shape
+    if y_data.shape() == x_data.shape() {
+        let result = ndarray::Zip::from(&*y_data)
+            .and(&*x_data)
+            .map_collect(|&y_val, &x_val| y_val.atan2(x_val));
+        return Ok(Obj::wrap(NDArray::new(result)));
     }
 
-    let result = ndarray::Zip::from(&*y_data)
-        .and(&*x_data)
-        .map_collect(|&y_val, &x_val| y_val.atan2(x_val));
+    // Broadcasting case
+    let out_shape = broadcast_shape_2(y_data.shape(), x_data.shape())?;
+    let out_ndim = out_shape.len();
+    let out_size: usize = out_shape.iter().product();
 
+    let mut result_data = Vec::with_capacity(out_size);
+
+    let mut out_idx = vec![0usize; out_ndim];
+    for _ in 0..out_size {
+        let y_idx = broadcast_index_for(&out_idx, y_data.shape(), out_ndim);
+        let x_idx = broadcast_index_for(&out_idx, x_data.shape(), out_ndim);
+
+        let y_val = y_data[IxDyn(&y_idx)];
+        let x_val = x_data[IxDyn(&x_idx)];
+        result_data.push(y_val.atan2(x_val));
+
+        // Increment output index
+        for d in (0..out_ndim).rev() {
+            out_idx[d] += 1;
+            if out_idx[d] < out_shape[d] {
+                break;
+            }
+            out_idx[d] = 0;
+        }
+    }
+
+    let result = ArrayD::from_shape_vec(IxDyn(&out_shape), result_data)
+        .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create result: {}", e)))?;
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
@@ -179,18 +265,49 @@ pub fn rad2deg(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x.to_degrees())))
 }
 
+/// Compute the hypotenuse sqrt(x^2 + y^2) element-wise.
+///
+/// Supports NumPy-style broadcasting: x and y are broadcast together to a common shape.
 pub fn hypot(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let y_data = y.get_data();
 
-    if x_data.shape() != y_data.shape() {
-        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    // Simple case: same shape
+    if x_data.shape() == y_data.shape() {
+        let result = ndarray::Zip::from(&*x_data)
+            .and(&*y_data)
+            .map_collect(|&x_val, &y_val| x_val.hypot(y_val));
+        return Ok(Obj::wrap(NDArray::new(result)));
     }
 
-    let result = ndarray::Zip::from(&*x_data)
-        .and(&*y_data)
-        .map_collect(|&x_val, &y_val| x_val.hypot(y_val));
+    // Broadcasting case
+    let out_shape = broadcast_shape_2(x_data.shape(), y_data.shape())?;
+    let out_ndim = out_shape.len();
+    let out_size: usize = out_shape.iter().product();
 
+    let mut result_data = Vec::with_capacity(out_size);
+
+    let mut out_idx = vec![0usize; out_ndim];
+    for _ in 0..out_size {
+        let x_idx = broadcast_index_for(&out_idx, x_data.shape(), out_ndim);
+        let y_idx = broadcast_index_for(&out_idx, y_data.shape(), out_ndim);
+
+        let x_val = x_data[IxDyn(&x_idx)];
+        let y_val = y_data[IxDyn(&y_idx)];
+        result_data.push(x_val.hypot(y_val));
+
+        // Increment output index
+        for d in (0..out_ndim).rev() {
+            out_idx[d] += 1;
+            if out_idx[d] < out_shape[d] {
+                break;
+            }
+            out_idx[d] = 0;
+        }
+    }
+
+    let result = ArrayD::from_shape_vec(IxDyn(&out_shape), result_data)
+        .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create result: {}", e)))?;
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
@@ -473,16 +590,35 @@ pub fn fmin(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Clip array values to a given range [min_val, max_val].
+///
+/// # Arguments
+/// * `min_val` - Minimum value. Values below this are set to min_val.
+///               If NaN, no lower bound is applied.
+/// * `max_val` - Maximum value. Values above this are set to max_val.
+///               If NaN, no upper bound is applied.
+///
+/// # Errors
+/// Returns an error if min_val > max_val (and neither is NaN), matching NumPy's ValueError.
+///
+/// # NaN Handling
+/// - NaN in input: preserved in output
+/// - NaN min: only apply max bound
+/// - NaN max: only apply min bound
+/// - Both NaN: return copy of input
 pub fn clip(arr: &NDArray, min_val: f64, max_val: f64) -> Result<Obj<NDArray>, Error> {
-    // NumPy semantics for clip with NaN bounds:
-    // - NaN min: only apply max bound
-    // - NaN max: only apply min bound
-    // - Both NaN: return copy of input
-    // - min > max: ValueError in NumPy (we'll allow but clamp to empty range)
-    let data = arr.get_data();
-
     let min_is_nan = min_val.is_nan();
     let max_is_nan = max_val.is_nan();
+
+    // Validate min <= max when both are non-NaN (matching NumPy's ValueError)
+    if !min_is_nan && !max_is_nan && min_val > max_val {
+        return Err(Error::new(
+            exception::arg_error(),
+            format!("clip: min_val ({}) must be less than or equal to max_val ({})", min_val, max_val)
+        ));
+    }
+
+    let data = arr.get_data();
 
     let result = data.mapv(|x| {
         if x.is_nan() {
@@ -595,6 +731,13 @@ pub fn matmul(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
+/// Compute the inner product of two arrays.
+///
+/// For 1-D arrays, this is the standard inner product (sum of element-wise products).
+/// For higher-dimensional arrays, this computes a sum product over the last axes of
+/// both inputs: inner(a, b)[i,j,k,m] = sum(a[i,j,:] * b[k,m,:])
+///
+/// Result shape: a.shape[:-1] + b.shape[:-1]
 pub fn inner(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
@@ -623,38 +766,42 @@ pub fn inner(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let contract_dim = a_shape[a_ndim - 1];
 
     // Build result shape
+    let a_outer_shape: Vec<usize> = a_shape[..a_ndim - 1].to_vec();
+    let b_outer_shape: Vec<usize> = b_shape[..b_ndim - 1].to_vec();
     let mut result_shape: Vec<usize> = Vec::new();
-    for i in 0..(a_ndim - 1) {
-        result_shape.push(a_shape[i]);
-    }
-    for i in 0..(b_ndim - 1) {
-        result_shape.push(b_shape[i]);
-    }
+    result_shape.extend(&a_outer_shape);
+    result_shape.extend(&b_outer_shape);
 
     // Compute sizes
-    let a_outer_size: usize = a_shape[..a_ndim - 1].iter().product::<usize>().max(1);
-    let b_outer_size: usize = b_shape[..b_ndim - 1].iter().product::<usize>().max(1);
+    let a_outer_size: usize = a_outer_shape.iter().product::<usize>().max(1);
+    let b_outer_size: usize = b_outer_shape.iter().product::<usize>().max(1);
     let result_size = (a_outer_size * b_outer_size).max(1);
-
-    let a_flat: Vec<f64> = a_data.iter().cloned().collect();
-    let b_flat: Vec<f64> = b_data.iter().cloned().collect();
 
     let mut result_data = vec![0.0; result_size];
 
+    // Pre-compute strides for proper n-dimensional indexing
+    let a_contract_stride = 1usize; // Last dimension is contiguous
+    let a_outer_stride = contract_dim;
+    let b_contract_stride = 1usize;
+    let b_outer_stride = contract_dim;
+
+    // Iterate using proper multi-dimensional logic
     for a_outer in 0..a_outer_size {
         for b_outer in 0..b_outer_size {
             let mut sum = 0.0;
             for k in 0..contract_dim {
-                let a_idx = a_outer * contract_dim + k;
-                let b_idx = b_outer * contract_dim + k;
-                if a_idx < a_flat.len() && b_idx < b_flat.len() {
-                    sum += a_flat[a_idx] * b_flat[b_idx];
-                }
+                // For row-major layout: a[outer_idx, k] = a_flat[outer_idx * contract_dim + k]
+                let a_idx = a_outer * a_outer_stride + k * a_contract_stride;
+                let b_idx = b_outer * b_outer_stride + k * b_contract_stride;
+
+                // These indices are guaranteed to be in bounds because:
+                // - a_outer < a_outer_size = product(a_shape[:-1])
+                // - k < contract_dim = a_shape[-1]
+                // - a_idx = a_outer * contract_dim + k < a_outer_size * contract_dim = a.len()
+                sum += a_data.as_slice().unwrap()[a_idx] * b_data.as_slice().unwrap()[b_idx];
             }
             let result_idx = a_outer * b_outer_size + b_outer;
-            if result_idx < result_data.len() {
-                result_data[result_idx] = sum;
-            }
+            result_data[result_idx] = sum;
         }
     }
 
@@ -736,6 +883,15 @@ pub fn cross(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     Err(Error::new(exception::arg_error(), "Cross product requires 2D or 3D vectors"))
 }
 
+/// Compute tensor dot product along specified axes.
+///
+/// For tensordot with axes=n, contract over the last n axes of a and the first n axes of b.
+/// Result shape: a.shape[:-axes] + b.shape[axes:]
+///
+/// # Examples
+/// - axes=0: outer product (no contraction)
+/// - axes=1: contract last axis of a with first axis of b
+/// - axes=2: contract last 2 axes of a with first 2 axes of b
 pub fn tensordot(a: &NDArray, b: &NDArray, axes: i64) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
@@ -777,55 +933,57 @@ pub fn tensordot(a: &NDArray, b: &NDArray, axes: i64) -> Result<Obj<NDArray>, Er
     }
 
     // Compute result shape: a_shape[:-axes] + b_shape[axes:]
+    let a_outer_shape: Vec<usize> = a_shape[..(a_ndim - axes)].to_vec();
+    let b_outer_shape: Vec<usize> = b_shape[axes..].to_vec();
+    let contract_shape: Vec<usize> = b_shape[..axes].to_vec();
+
     let mut result_shape: Vec<usize> = Vec::new();
-    for i in 0..(a_ndim - axes) {
-        result_shape.push(a_shape[i]);
-    }
-    for i in axes..b_ndim {
-        result_shape.push(b_shape[i]);
-    }
+    result_shape.extend(&a_outer_shape);
+    result_shape.extend(&b_outer_shape);
 
     // Size of the contracting dimensions
-    let contract_size: usize = (0..axes).map(|i| b_shape[i]).product();
+    let contract_size: usize = contract_shape.iter().product::<usize>().max(1);
 
     // Size of the outer dimensions for a and b
-    let a_outer_size: usize = (0..(a_ndim - axes)).map(|i| a_shape[i]).product();
-    let b_outer_size: usize = (axes..b_ndim).map(|i| b_shape[i]).product();
+    let a_outer_size: usize = a_outer_shape.iter().product::<usize>().max(1);
+    let b_outer_size: usize = b_outer_shape.iter().product::<usize>().max(1);
 
-    // Flatten arrays for computation
-    let a_flat: Vec<f64> = a_data.iter().cloned().collect();
-    let b_flat: Vec<f64> = b_data.iter().cloned().collect();
+    let result_size = (a_outer_size * b_outer_size).max(1);
+    let mut result_data = vec![0.0; result_size];
 
-    let mut result_data = vec![0.0; a_outer_size * b_outer_size];
+    // Compute strides for proper n-dimensional indexing
+    // a has shape: a_outer_shape + contract_shape (in row-major order)
+    // b has shape: contract_shape + b_outer_shape (in row-major order)
 
-    // Compute tensordot by iterating over all combinations
-    // This is a general but not optimized implementation
-    for a_outer in 0..a_outer_size.max(1) {
-        for b_outer in 0..b_outer_size.max(1) {
+    // For a: element at (a_outer_idx, contract_idx) has flat index:
+    //   a_outer_idx * contract_size + contract_idx
+    // For b: element at (contract_idx, b_outer_idx) has flat index:
+    //   contract_idx * b_outer_size + b_outer_idx
+
+    // Use as_slice for O(1) access
+    let a_slice = a_data.as_slice().unwrap();
+    let b_slice = b_data.as_slice().unwrap();
+
+    for a_outer in 0..a_outer_size {
+        for b_outer in 0..b_outer_size {
             let mut sum = 0.0;
-            for contract in 0..contract_size.max(1) {
-                // Map a_outer and contract to flat index in a
+            for contract in 0..contract_size {
+                // Compute flat indices using proper stride calculations
                 let a_idx = a_outer * contract_size + contract;
-                // Map contract and b_outer to flat index in b
                 let b_idx = contract * b_outer_size + b_outer;
 
-                if a_idx < a_flat.len() && b_idx < b_flat.len() {
-                    sum += a_flat[a_idx] * b_flat[b_idx];
-                }
+                sum += a_slice[a_idx] * b_slice[b_idx];
             }
             let result_idx = a_outer * b_outer_size + b_outer;
-            if result_idx < result_data.len() {
-                result_data[result_idx] = sum;
-            }
+            result_data[result_idx] = sum;
         }
     }
 
     // Handle scalar result
     if result_shape.is_empty() {
-        result_shape.push(1);
-        if result_data.is_empty() {
-            result_data.push(0.0);
-        }
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[]), result_data).unwrap(),
+        )));
     }
 
     Ok(Obj::wrap(NDArray::new(
@@ -836,6 +994,12 @@ pub fn tensordot(a: &NDArray, b: &NDArray, axes: i64) -> Result<Obj<NDArray>, Er
 
 // Logical operations
 
+/// Compute element-wise logical AND.
+///
+/// # NaN Handling
+/// NaN values are treated as truthy (non-zero). This follows the convention that
+/// any non-zero value (including NaN) is truthy, since NaN != 0.0 in IEEE 754.
+/// This matches NumPy's behavior where np.logical_and(np.nan, True) returns True.
 pub fn logical_and(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
@@ -851,6 +1015,12 @@ pub fn logical_and(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Compute element-wise logical OR.
+///
+/// # NaN Handling
+/// NaN values are treated as truthy (non-zero). This follows the convention that
+/// any non-zero value (including NaN) is truthy, since NaN != 0.0 in IEEE 754.
+/// This matches NumPy's behavior where np.logical_or(np.nan, False) returns True.
 pub fn logical_or(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
@@ -871,6 +1041,12 @@ pub fn logical_not(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| if x == 0.0 { 1.0 } else { 0.0 })))
 }
 
+/// Compute element-wise logical XOR.
+///
+/// # NaN Handling
+/// NaN values are treated as truthy (non-zero). This follows the convention that
+/// any non-zero value (including NaN) is truthy, since NaN != 0.0 in IEEE 754.
+/// This matches NumPy's behavior.
 pub fn logical_xor(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     let a_data = a.get_data();
     let b_data = b.get_data();
@@ -892,6 +1068,14 @@ pub fn logical_xor(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
 
 /// Select elements from x or y based on condition.
 ///
+/// For each element, returns x if condition is truthy (non-zero), else y.
+///
+/// # NaN Handling
+/// NaN values in the condition are treated as truthy (non-zero), since
+/// NaN != 0.0 in IEEE 754 semantics. This matches NumPy's behavior where
+/// np.where(np.nan, 'a', 'b') returns 'a'.
+///
+/// # Broadcasting
 /// Supports NumPy-style broadcasting: condition, x, and y are broadcast together
 /// to a common shape before selection.
 pub fn where_fn(condition: &NDArray, x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
@@ -941,6 +1125,32 @@ pub fn where_fn(condition: &NDArray, x: &NDArray, y: &NDArray) -> Result<Obj<NDA
     let result = ArrayD::from_shape_vec(IxDyn(&out_shape), result_data)
         .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create result: {}", e)))?;
     Ok(Obj::wrap(NDArray::new(result)))
+}
+
+/// Compute broadcast shape for two input shapes (NumPy broadcasting rules)
+fn broadcast_shape_2(shape1: &[usize], shape2: &[usize]) -> Result<Vec<usize>, Error> {
+    let ndim = shape1.len().max(shape2.len());
+    let mut result = vec![0; ndim];
+
+    for i in 0..ndim {
+        let dim1 = if i < ndim - shape1.len() { 1 } else { shape1[shape1.len() - (ndim - i)] };
+        let dim2 = if i < ndim - shape2.len() { 1 } else { shape2[shape2.len() - (ndim - i)] };
+
+        // Find the max dimension that's not 1
+        let max_dim = dim1.max(dim2);
+
+        // Check compatibility: each dimension must be 1 or equal to max_dim
+        if (dim1 != 1 && dim1 != max_dim) || (dim2 != 1 && dim2 != max_dim) {
+            return Err(Error::new(
+                exception::arg_error(),
+                format!("operands could not be broadcast together with shapes {:?} {:?}", shape1, shape2)
+            ));
+        }
+
+        result[i] = max_dim;
+    }
+
+    Ok(result)
 }
 
 /// Compute broadcast shape for three input shapes (NumPy broadcasting rules)

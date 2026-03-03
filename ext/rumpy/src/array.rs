@@ -1,4 +1,23 @@
-//! Core NDArray type and operations
+//! Core NDArray type and operations.
+//!
+//! # Behavior Differences from NumPy
+//!
+//! ## Data Type
+//! RumPy only supports float64 (f64) arrays. Integer and complex types are not supported.
+//! All numeric inputs are converted to f64.
+//!
+//! ## NaN Handling
+//! - Comparisons: NaN values compare as expected (NaN != NaN is true)
+//! - Sorting: NaN values sort to the end (greater than all other values)
+//! - Logical operations: NaN is truthy (non-zero)
+//! - Reductions: Most functions propagate NaN; use nan* variants for NaN-ignoring behavior
+//!
+//! ## Broadcasting
+//! Full NumPy-style broadcasting is supported for binary operations and functions
+//! like where(), arctan2(), and hypot().
+//!
+//! ## Memory Layout
+//! Arrays use row-major (C-style) memory layout, matching NumPy's default.
 
 use magnus::{
     class, define_class, exception, function, method, prelude::*, typed_data::Obj,
@@ -1184,6 +1203,11 @@ pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
 /// # Important
 /// The input array MUST be sorted in ascending order. If the array is not sorted,
 /// the results are undefined. Use `RumPy.sort()` first if needed.
+///
+/// # NaN Handling
+/// NaN values in the array are sorted to the end (as if greater than all other values).
+/// When searching for NaN, it will be placed at or after all NaN values in the array.
+/// This uses the same NaN-safe comparison as `sort()`, where NaN > any finite number.
 pub fn searchsorted_side(array: &NDArray, value: f64, side: Option<String>) -> Result<i64, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
@@ -1298,12 +1322,20 @@ pub fn squeeze_axis(array: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, 
     }
 }
 
-/// Take elements from array along an axis
+/// Take elements from array along an axis.
+///
+/// # Errors
+/// Raises an error if any index is out of bounds. Use mode='clip' or mode='wrap'
+/// in NumPy for alternative behaviors (not yet implemented here).
 pub fn take(array: &NDArray, indices: &NDArray) -> Result<Obj<NDArray>, Error> {
     take_axis(array, indices, None)
 }
 
-/// Take elements from array along a specified axis
+/// Take elements from array along a specified axis.
+///
+/// # Errors
+/// Raises an IndexError if any index is out of bounds. This matches NumPy's
+/// default mode='raise' behavior.
 pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let idx_data = indices.get_data();
@@ -1313,9 +1345,18 @@ pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Resul
         None => {
             // Take from flattened array
             let flat: Vec<f64> = data.iter().cloned().collect();
-            let result: Vec<f64> = idx_vec.iter().map(|&i| {
-                if i < flat.len() { flat[i] } else { f64::NAN }
-            }).collect();
+
+            // Validate all indices are in bounds
+            for (i, &idx) in idx_vec.iter().enumerate() {
+                if idx >= flat.len() {
+                    return Err(Error::new(
+                        exception::index_error(),
+                        format!("index {} is out of bounds for axis with size {}", idx, flat.len())
+                    ));
+                }
+            }
+
+            let result: Vec<f64> = idx_vec.iter().map(|&i| flat[i]).collect();
             Ok(Obj::wrap(NDArray::new(
                 ArrayD::from_shape_vec(idx_data.raw_dim(), result).unwrap()
             )))
@@ -1333,6 +1374,18 @@ pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Resul
             }
 
             let shape = data.shape().to_vec();
+            let axis_len = shape[axis];
+
+            // Validate all indices are in bounds for this axis
+            for &idx in &idx_vec {
+                if idx >= axis_len {
+                    return Err(Error::new(
+                        exception::index_error(),
+                        format!("index {} is out of bounds for axis {} with size {}", idx, axis, axis_len)
+                    ));
+                }
+            }
+
             let num_indices = idx_vec.len();
 
             let mut new_shape = shape.clone();
@@ -1340,7 +1393,6 @@ pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Resul
 
             let outer_size: usize = shape[..axis].iter().product();
             let inner_size: usize = shape[axis+1..].iter().product();
-            let axis_len = shape[axis];
 
             let flat: Vec<f64> = data.iter().cloned().collect();
             let mut result_data = Vec::with_capacity(outer_size.max(1) * num_indices * inner_size.max(1));
@@ -1349,7 +1401,7 @@ pub fn take_axis(array: &NDArray, indices: &NDArray, axis: Option<i64>) -> Resul
                 for &idx in &idx_vec {
                     for i in 0..inner_size.max(1) {
                         let flat_idx = o * axis_len * inner_size + idx * inner_size + i;
-                        result_data.push(if flat_idx < flat.len() { flat[flat_idx] } else { f64::NAN });
+                        result_data.push(flat[flat_idx]);
                     }
                 }
             }

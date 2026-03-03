@@ -8,16 +8,29 @@
 //! - `mean`, `std`, `var`: Return NaN if any element is NaN
 //! - `min`, `max`: Return NaN if any element is NaN
 //! - `median`, `percentile`: NaN values sort to the end, may affect result
+//! - `cumsum`, `cumprod`: Once a NaN is encountered, all subsequent values are NaN
 //!
 //! ## NaN-ignoring functions (use these for data with missing values)
 //! - `nansum`, `nanmean`, `nanstd`, `nanvar`: Ignore NaN values
 //! - `nanmin`, `nanmax`: Ignore NaN values
 //! - `nanmedian`: Filter out NaN before computing median
 //! - `nanargmin`, `nanargmax`: Return index of min/max among non-NaN values
+//! - `nancumsum`, `nancumprod`: Return NaN at NaN positions, accumulate elsewhere
 //!
 //! ## Special cases
-//! - `quantile`: Filters out NaN values before computing
+//! - `quantile`: Filters out NaN values before computing; returns NaN for q outside [0,1]
 //! - `corrcoef`, `cov`: NaN in input may produce NaN in output
+//! - Zero variance: `corrcoef` returns NaN for off-diagonal elements when variance is zero
+//!
+//! # Edge Cases
+//!
+//! ## Single Observation (n=1)
+//! - `var_ddof(ddof=1)`, `std_ddof(ddof=1)`: Return NaN (insufficient degrees of freedom)
+//! - `cov`, `corrcoef`: Return NaN (covariance undefined with single observation)
+//!
+//! ## Empty Arrays
+//! - `mean`, `median`, `quantile`: Return NaN
+//! - `min`, `max`: Raise an error (no identity element)
 
 use crate::array::NDArray;
 use magnus::{exception, typed_data::Obj, Error, IntoValue, RArray, Value, TryConvert};
@@ -81,13 +94,15 @@ pub fn prod_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
             let outer_size: usize = shape[..axis].iter().product();
             let inner_size: usize = shape[axis+1..].iter().product();
 
-            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            // Use direct indexing via as_slice() for O(1) access instead of O(n) .nth()
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = Vec::with_capacity(outer_size.max(1) * inner_size.max(1));
             for o in 0..outer_size.max(1) {
                 for i in 0..inner_size.max(1) {
                     let mut prod = 1.0;
                     for a in 0..axis_len {
                         let flat_idx = o * axis_len * inner_size + a * inner_size + i;
-                        prod *= data.iter().nth(flat_idx).cloned().unwrap_or(1.0);
+                        prod *= flat[flat_idx];
                     }
                     result_data.push(prod);
                 }
@@ -130,7 +145,17 @@ pub fn std(arr: &NDArray) -> f64 {
     var(arr).sqrt()
 }
 
-/// Standard deviation with ddof (delta degrees of freedom) parameter
+/// Standard deviation with ddof (delta degrees of freedom) parameter.
+///
+/// # Arguments
+/// * `ddof` - Delta degrees of freedom. The divisor is N - ddof, where N is the number
+///            of elements. Default is 0 (population standard deviation).
+///   - ddof=0: population standard deviation
+///   - ddof=1: sample standard deviation with Bessel's correction
+///
+/// # Edge Cases
+/// Returns NaN when n <= ddof (e.g., single element with ddof=1), since standard
+/// deviation is undefined when there are not enough degrees of freedom.
 pub fn std_ddof(arr: &NDArray, ddof: Option<i64>) -> f64 {
     var_ddof(arr, ddof).sqrt()
 }
@@ -155,8 +180,17 @@ pub fn var(arr: &NDArray) -> f64 {
     var_ddof(arr, Some(0))
 }
 
-/// Variance with ddof (delta degrees of freedom) parameter
-/// ddof=0 for population variance, ddof=1 for sample variance
+/// Variance with ddof (delta degrees of freedom) parameter.
+///
+/// # Arguments
+/// * `ddof` - Delta degrees of freedom. The divisor is N - ddof, where N is the number
+///            of elements. Default is 0 (population variance).
+///   - ddof=0: population variance (divide by N)
+///   - ddof=1: sample variance with Bessel's correction (divide by N-1)
+///
+/// # Edge Cases
+/// Returns NaN when n <= ddof (e.g., single element with ddof=1), since variance
+/// is undefined when there are not enough degrees of freedom.
 pub fn var_ddof(arr: &NDArray, ddof: Option<i64>) -> f64 {
     let data = arr.get_data();
     let n = data.len();
@@ -551,10 +585,20 @@ pub fn percentile(arr: &NDArray, q: f64) -> f64 {
 
 /// Compute the q-th quantile of the array.
 ///
+/// # Arguments
+/// * `q` - Quantile value, must be in range [0, 1]. Values outside this range
+///         will return NaN (matching NumPy behavior which raises ValueError).
+///
 /// # NaN Handling
 /// NaN values are filtered out before computing the quantile. If all values
 /// are NaN, returns NaN. This matches NumPy's nanquantile behavior.
 pub fn quantile(arr: &NDArray, q: f64) -> f64 {
+    // Validate q is in [0, 1] range
+    if q < 0.0 || q > 1.0 || q.is_nan() {
+        // Return NaN for invalid q values (NumPy raises ValueError, but we return NaN for consistency)
+        return f64::NAN;
+    }
+
     let data = arr.get_data();
     // Filter out NaN values before computing quantile
     let mut sorted: Vec<f64> = data.iter().cloned().filter(|x| !x.is_nan()).collect();
@@ -611,8 +655,9 @@ pub fn histogram(arr: &NDArray, bins: usize) -> Result<RArray, Error> {
 
     for &x in &flat {
         if range == 0.0 || range.abs() < 1e-14 {
-            // All values go in the middle bin
-            counts[bins / 2] += 1.0;
+            // All uniform values go in the first bin (bin 0), matching NumPy behavior
+            // NumPy places values at the left edge of the histogram
+            counts[0] += 1.0;
         } else {
             let bin = ((x - adjusted_min) / bin_width).floor() as usize;
             let bin = bin.min(bins - 1);
@@ -687,12 +732,21 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let mut corr = vec![0.0; n_vars * n_vars];
     for i in 0..n_vars {
         for j in 0..n_vars {
-            let denom = (cov[i * n_vars + i] * cov[j * n_vars + j]).sqrt();
-            corr[i * n_vars + j] = if denom > 0.0 {
-                cov[i * n_vars + j] / denom
+            let var_i = cov[i * n_vars + i];
+            let var_j = cov[j * n_vars + j];
+
+            if var_i <= 0.0 && var_j <= 0.0 {
+                // Both variables have zero variance: correlation is undefined
+                // NumPy returns NaN for off-diagonal, 1.0 for diagonal
+                corr[i * n_vars + j] = if i == j { 1.0 } else { f64::NAN };
+            } else if var_i <= 0.0 || var_j <= 0.0 {
+                // One variable has zero variance: correlation is undefined (NaN)
+                // except diagonal which is 1.0
+                corr[i * n_vars + j] = if i == j { 1.0 } else { f64::NAN };
             } else {
-                if i == j { 1.0 } else { 0.0 }
-            };
+                let denom = (var_i * var_j).sqrt();
+                corr[i * n_vars + j] = cov[i * n_vars + j] / denom;
+            }
         }
     }
 
@@ -701,6 +755,12 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
+/// Compute the covariance matrix.
+///
+/// # Edge Cases
+/// For a single observation (n_obs=1), covariance is undefined and returns NaN
+/// for all elements. This matches NumPy's behavior where cov with ddof=1 returns
+/// NaN when there's insufficient data.
 pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
 
@@ -711,6 +771,14 @@ pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let shape = data.shape();
     let n_vars = shape[0];
     let n_obs = shape[1];
+
+    // For n_obs < 2, covariance is undefined (need at least 2 observations for sample cov)
+    if n_obs < 2 {
+        let cov = vec![f64::NAN; n_vars * n_vars];
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[n_vars, n_vars]), cov).unwrap(),
+        )));
+    }
 
     let means: Vec<f64> = (0..n_vars)
         .map(|i| {
@@ -725,7 +793,7 @@ pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
             for k in 0..n_obs {
                 sum += (data[[i, k]] - means[i]) * (data[[j, k]] - means[j]);
             }
-            cov[i * n_vars + j] = sum / (n_obs - 1).max(1) as f64;
+            cov[i * n_vars + j] = sum / (n_obs - 1) as f64;
         }
     }
 
@@ -814,16 +882,26 @@ pub fn nanprod(arr: &NDArray) -> f64 {
     arr.get_data().iter().filter(|x| !x.is_nan()).product()
 }
 
+/// Cumulative sum, treating NaN as zero.
+///
+/// # NumPy Behavior
+/// Unlike `cumsum` which propagates NaN, `nancumsum` treats NaN as zero.
+/// However, following NumPy's behavior, NaN positions in the output retain NaN
+/// to indicate where missing values were in the input.
 pub fn nancumsum(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     let mut sum = 0.0;
     let result: Vec<f64> = data
         .iter()
         .map(|&x| {
-            if !x.is_nan() {
+            if x.is_nan() {
+                // NumPy returns NaN at NaN positions to preserve the information
+                // that this position had a missing value
+                f64::NAN
+            } else {
                 sum += x;
+                sum
             }
-            sum
         })
         .collect();
     Obj::wrap(NDArray::new(
@@ -831,16 +909,26 @@ pub fn nancumsum(arr: &NDArray) -> Obj<NDArray> {
     ))
 }
 
+/// Cumulative product, treating NaN as one.
+///
+/// # NumPy Behavior
+/// Unlike `cumprod` which propagates NaN, `nancumprod` treats NaN as one.
+/// However, following NumPy's behavior, NaN positions in the output retain NaN
+/// to indicate where missing values were in the input.
 pub fn nancumprod(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     let mut prod = 1.0;
     let result: Vec<f64> = data
         .iter()
         .map(|&x| {
-            if !x.is_nan() {
+            if x.is_nan() {
+                // NumPy returns NaN at NaN positions to preserve the information
+                // that this position had a missing value
+                f64::NAN
+            } else {
                 prod *= x;
+                prod
             }
-            prod
         })
         .collect();
     Obj::wrap(NDArray::new(
@@ -905,6 +993,25 @@ pub fn trapz_x(y: &NDArray, x: &NDArray) -> Result<f64, Error> {
     Ok(sum)
 }
 
+/// Fit a polynomial of specified degree to data points using least squares.
+///
+/// Returns coefficients in descending order of powers: [c_n, c_{n-1}, ..., c_1, c_0]
+/// where the polynomial is c_n * x^n + c_{n-1} * x^{n-1} + ... + c_1 * x + c_0.
+///
+/// # Numerical Stability
+/// This implementation uses Gaussian elimination with partial pivoting. For
+/// ill-conditioned problems (e.g., high-degree polynomials, widely varying x values,
+/// or nearly collinear data), the results may be inaccurate or the function may
+/// return an error.
+///
+/// For better numerical stability with ill-conditioned data, consider:
+/// - Centering and scaling x values: x_scaled = (x - mean(x)) / std(x)
+/// - Using lower polynomial degrees
+/// - Using orthogonal polynomial bases (not implemented here)
+///
+/// # Errors
+/// Returns an error if the Vandermonde matrix is singular or nearly singular,
+/// which typically indicates collinear or ill-conditioned data.
 pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let y_data = y.get_data();
@@ -1026,6 +1133,17 @@ pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
 /// right=False (default): bins[i-1] <= x < bins[i]
 /// right=True: bins[i-1] < x <= bins[i]
 ///
+/// # Edge Cases
+/// - Values less than bins[0]: returns 0 (with right=False) or 0 (with right=True)
+/// - Values greater than bins[-1]: returns len(bins)
+/// - Values equal to bin edges: handled by the right parameter
+///   - right=False: value == bins[i] is placed in bin i+1
+///   - right=True: value == bins[i] is placed in bin i
+///
+/// # Important
+/// The bins array MUST be monotonically increasing or decreasing.
+/// If bins are not sorted, an error is raised.
+///
 /// Note: This is equivalent to searchsorted with appropriate side parameter.
 pub fn digitize_right(x: &NDArray, bins: &NDArray, right: Option<bool>) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
@@ -1033,6 +1151,18 @@ pub fn digitize_right(x: &NDArray, bins: &NDArray, right: Option<bool>) -> Resul
 
     let bins_vec: Vec<f64> = bins_data.iter().cloned().collect();
     let right = right.unwrap_or(false);
+
+    // Check if bins are sorted (either ascending or descending)
+    if bins_vec.len() >= 2 {
+        let is_ascending = bins_vec.windows(2).all(|w| w[0] <= w[1]);
+        let is_descending = bins_vec.windows(2).all(|w| w[0] >= w[1]);
+        if !is_ascending && !is_descending {
+            return Err(Error::new(
+                exception::arg_error(),
+                "bins must be monotonically increasing or decreasing"
+            ));
+        }
+    }
 
     // Use binary search (same as searchsorted) for O(log n) performance
     let result: Vec<f64> = x_data.iter().map(|&xi| {
