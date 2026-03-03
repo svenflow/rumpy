@@ -76,7 +76,8 @@ pub fn inv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Moore-Penrose pseudo-inverse (simplified - uses normal equations)
+/// Moore-Penrose pseudo-inverse using regularized least squares
+/// Handles rank-deficient matrices by using Tikhonov regularization
 pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
 
@@ -84,12 +85,53 @@ pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
         return Err(Error::new(exception::arg_error(), "pinv requires 2D array"));
     }
 
-    // A+ = (A^T A)^-1 A^T for overdetermined systems
-    // This is a simplified implementation
+    let shape = data.shape();
+    let m = shape[0];
+    let n = shape[1];
+
     let at = Obj::wrap(NDArray::new(data.t().to_owned()));
+
+    // Try the normal equations first: A+ = (A^T A)^-1 A^T
     let ata = matmul(&at, arr)?;
-    let ata_inv = inv(&ata)?;
-    matmul(&ata_inv, &at)
+
+    // Check if A^T A is well-conditioned by checking its determinant
+    let d = det(&ata)?;
+
+    if d.abs() > 1e-10 {
+        // Matrix is well-conditioned, use normal equations
+        let ata_inv = inv(&ata)?;
+        return matmul(&ata_inv, &at);
+    }
+
+    // Rank-deficient case: use Tikhonov regularization (ridge regression)
+    // A+ ≈ (A^T A + λI)^-1 A^T where λ is a small regularization parameter
+    let lambda = 1e-10;
+
+    // Add λI to A^T A
+    let mut ata_reg_data = ata.get_data().to_owned();
+    let ata_shape = ata_reg_data.shape();
+    let nn = ata_shape[0];
+    for i in 0..nn {
+        ata_reg_data[[i, i]] += lambda;
+    }
+
+    let ata_reg = Obj::wrap(NDArray::new(ata_reg_data));
+
+    match inv(&ata_reg) {
+        Ok(ata_reg_inv) => matmul(&ata_reg_inv, &at),
+        Err(_) => {
+            // If still fails, use A^T (A A^T + λI)^-1 for m < n case
+            let aat = matmul(arr, &at)?;
+            let mut aat_reg_data = aat.get_data().to_owned();
+            let mm = aat_reg_data.shape()[0];
+            for i in 0..mm {
+                aat_reg_data[[i, i]] += lambda;
+            }
+            let aat_reg = Obj::wrap(NDArray::new(aat_reg_data));
+            let aat_reg_inv = inv(&aat_reg)?;
+            matmul(&at, &aat_reg_inv)
+        }
+    }
 }
 
 /// Matrix determinant using LU decomposition
@@ -336,7 +378,7 @@ pub fn norm_ord(arr: &NDArray, ord: Option<f64>) -> Result<f64, Error> {
 }
 
 /// Condition number (ratio of largest to smallest singular value)
-/// Simplified implementation
+/// Uses norm(A) * norm(A^-1) with fallback for singular matrices
 pub fn cond(arr: &NDArray) -> Result<f64, Error> {
     let data = arr.get_data();
 
@@ -344,12 +386,30 @@ pub fn cond(arr: &NDArray) -> Result<f64, Error> {
         return Err(Error::new(exception::arg_error(), "cond requires 2D array"));
     }
 
-    // Simplified: use norm(A) * norm(A^-1)
-    let norm_a = norm(arr)?;
-    let inv_a = inv(arr)?;
-    let norm_inv = norm(&inv_a)?;
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "cond requires square matrix"));
+    }
 
-    Ok(norm_a * norm_inv)
+    // Check if matrix is singular
+    let d = det(arr)?;
+    if d.abs() < 1e-14 {
+        // Singular matrix has infinite condition number
+        return Ok(f64::INFINITY);
+    }
+
+    // Use norm(A) * norm(A^-1)
+    let norm_a = norm(arr)?;
+    match inv(arr) {
+        Ok(inv_a) => {
+            let norm_inv = norm(&inv_a)?;
+            Ok(norm_a * norm_inv)
+        }
+        Err(_) => {
+            // Inverse failed, matrix is effectively singular
+            Ok(f64::INFINITY)
+        }
+    }
 }
 
 /// Eigenvalues and eigenvectors
@@ -384,7 +444,7 @@ pub fn svd(_arr: &NDArray) -> Result<RArray, Error> {
         "svd not fully implemented - requires LAPACK or similar library for accurate SVD"))
 }
 
-/// QR decomposition
+/// QR decomposition using Modified Gram-Schmidt (numerically stable)
 pub fn qr(arr: &NDArray) -> Result<RArray, Error> {
     let data = arr.get_data();
 
@@ -395,49 +455,64 @@ pub fn qr(arr: &NDArray) -> Result<RArray, Error> {
     let shape = data.shape();
     let m = shape[0];
     let n = shape[1];
+    let k = m.min(n); // Number of columns in Q
 
-    // Gram-Schmidt orthogonalization
-    let mut q_cols: Vec<Vec<f64>> = Vec::new();
-    let mut r = vec![0.0; n * n];
+    // Modified Gram-Schmidt - more numerically stable than classical GS
+    // We work with columns directly and orthogonalize against previous columns
+    let mut q_cols: Vec<Vec<f64>> = (0..n)
+        .map(|j| (0..m).map(|i| data[[i, j]]).collect())
+        .collect();
 
-    for j in 0..n {
-        // Get column j
-        let mut v: Vec<f64> = (0..m).map(|i| data[[i, j]]).collect();
+    let mut r = vec![0.0; k * n];
 
-        // Subtract projections
-        for (k, q_col) in q_cols.iter().enumerate() {
-            let proj: f64 = v.iter().zip(q_col.iter()).map(|(&a, &b)| a * b).sum();
-            r[k * n + j] = proj;
-            for i in 0..m {
-                v[i] -= proj * q_col[i];
+    for j in 0..k {
+        // Compute norm of column j
+        let norm_j: f64 = q_cols[j].iter().map(|&x| x * x).sum::<f64>().sqrt();
+
+        if norm_j > 1e-14 {
+            r[j * n + j] = norm_j;
+            // Normalize column j
+            for x in &mut q_cols[j] {
+                *x /= norm_j;
             }
-        }
-
-        // Normalize
-        let norm: f64 = v.iter().map(|&x| x * x).sum::<f64>().sqrt();
-        if norm > 1e-10 {
-            r[j * n + j] = norm;
-            for x in &mut v {
-                *x /= norm;
-            }
-            q_cols.push(v);
         } else {
             r[j * n + j] = 0.0;
-            q_cols.push(vec![0.0; m]);
+            // Column is zero, leave as is
+            continue;
+        }
+
+        // Modified GS: orthogonalize remaining columns against column j
+        for i in (j + 1)..n {
+            // Compute projection of column i onto column j
+            let proj: f64 = q_cols[i].iter()
+                .zip(q_cols[j].iter())
+                .map(|(&a, &b)| a * b)
+                .sum();
+
+            r[j * n + i] = proj;
+
+            // Subtract projection
+            for row in 0..m {
+                q_cols[i][row] -= proj * q_cols[j][row];
+            }
         }
     }
 
-    // Build Q matrix
-    let q: Vec<f64> = (0..m)
-        .flat_map(|i| q_cols.iter().map(move |col| col.get(i).cloned().unwrap_or(0.0)))
-        .collect();
+    // Build Q matrix (m x k)
+    let mut q = vec![0.0; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            q[i * k + j] = q_cols[j][i];
+        }
+    }
 
+    // Build R matrix (k x n)
     let result = RArray::new();
     result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[m, n.min(m)]), q).unwrap(),
+        ArrayD::from_shape_vec(IxDyn(&[m, k]), q).unwrap(),
     )))?;
     result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), r).unwrap(),
+        ArrayD::from_shape_vec(IxDyn(&[k, n]), r).unwrap(),
     )))?;
 
     Ok(result)
@@ -583,19 +658,74 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
 }
 
 /// Solve linear system Ax = b
+/// Checks for singular matrices before attempting to solve
 pub fn solve(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = a.get_data();
+
+    if data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "solve requires 2D array for A"));
+    }
+
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "Matrix A must be square"));
+    }
+
+    // Check if matrix is singular by computing determinant
+    let d = det(a)?;
+    if d.abs() < 1e-14 {
+        return Err(Error::new(exception::runtime_error(), "Matrix is singular and cannot be solved"));
+    }
+
     let a_inv = inv(a)?;
     matmul(&a_inv, b)
 }
 
-/// Least squares solution
-pub fn lstsq(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
-    // x = (A^T A)^-1 A^T b
-    let at = Obj::wrap(NDArray::new(a.get_data().t().to_owned()));
-    let ata = matmul(&at, a)?;
-    let ata_inv = inv(&ata)?;
-    let atb = matmul(&at, b)?;
-    matmul(&ata_inv, &atb)
+/// Least squares solution - returns (x, residuals, rank, singular_values)
+/// For compatibility, we return an RArray with 4 elements
+/// Note: singular_values is approximated since we don't have full SVD
+pub fn lstsq(a: &NDArray, b: &NDArray) -> Result<RArray, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "lstsq requires 2D array for A"));
+    }
+
+    let shape = a_data.shape();
+    let _m = shape[0];
+    let _n = shape[1];
+
+    // Compute solution using pseudo-inverse
+    let a_pinv = pinv(a)?;
+    let x = matmul(&a_pinv, b)?;
+
+    // Compute residuals: ||b - Ax||^2
+    let ax = matmul(a, &x)?;
+    let ax_data = ax.get_data();
+    let residuals: f64 = b_data.iter()
+        .zip(ax_data.iter())
+        .map(|(&bi, &axi)| (bi - axi).powi(2))
+        .sum();
+    let residuals_arr = Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[1]), vec![residuals]).unwrap()
+    ));
+
+    // Compute rank
+    let r = rank(a)?;
+
+    // Approximate singular values using eigenvalues of A^T A
+    // sqrt of eigenvalues of A^T A would be singular values
+    // Since we don't have eig, we'll return an empty array for singular values
+    let s = Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0]))));
+
+    let result = RArray::new();
+    result.push(x)?;  // x is already Obj<NDArray>
+    result.push(residuals_arr)?;
+    result.push(r)?;
+    result.push(s)?;
+
+    Ok(result)
 }
 
 /// Matrix power (raise square matrix to integer power)

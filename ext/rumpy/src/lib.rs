@@ -108,7 +108,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("rad2deg", function!(math::rad2deg, 1))?;
     rumpy.define_singleton_method("hypot", function!(math::hypot, 2))?;
     rumpy.define_singleton_method("diff", function!(math::diff, 1))?;
+    rumpy.define_singleton_method("diff_axis", function!(math::diff_axis, 2))?;
     rumpy.define_singleton_method("gradient", function!(math::gradient, 1))?;
+    rumpy.define_singleton_method("gradient_axis", function!(math::gradient_axis, 2))?;
     rumpy.define_singleton_method("mod", function!(math::mod_fn, 2))?;
     rumpy.define_singleton_method("fmod", function!(math::fmod, 2))?;
     rumpy.define_singleton_method("remainder", function!(math::remainder, 2))?;
@@ -267,8 +269,13 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("argsort", function!(array::argsort, 1))?;
     rumpy.define_singleton_method("argsort_axis", function!(array::argsort_axis, 2))?;
     rumpy.define_singleton_method("searchsorted", function!(array::searchsorted, 2))?;
+    rumpy.define_singleton_method("searchsorted_side", function!(array::searchsorted_side, 3))?;
     rumpy.define_singleton_method("unique", function!(array::unique, 1))?;
     rumpy.define_singleton_method("squeeze", function!(array::squeeze, 1))?;
+    rumpy.define_singleton_method("squeeze_axis", function!(array::squeeze_axis, 2))?;
+    rumpy.define_singleton_method("expand_dims", function!(array::expand_dims, 2))?;
+    rumpy.define_singleton_method("swapaxes", function!(array::swapaxes, 3))?;
+    rumpy.define_singleton_method("moveaxis", function!(array::moveaxis, 3))?;
     rumpy.define_singleton_method("take", function!(array::take, 2))?;
     rumpy.define_singleton_method("take_axis", function!(array::take_axis, 3))?;
     rumpy.define_singleton_method("put", function!(array::put, 3))?;

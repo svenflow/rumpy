@@ -189,48 +189,143 @@ pub fn hypot(x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn diff(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    diff_axis(arr, None)
+}
+
+/// Diff with optional axis parameter
+/// axis=None: compute diff on flattened array
+/// axis=i: compute diff along axis i
+pub fn diff_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
-    let flat: Vec<f64> = data.iter().cloned().collect();
 
-    if flat.len() < 2 {
-        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    match axis {
+        None => {
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            if flat.len() < 2 {
+                return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+            }
+            let result: Vec<f64> = flat.windows(2).map(|w| w[1] - w[0]).collect();
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(IxDyn(&[result.len()]), result).unwrap(),
+            )))
+        }
+        Some(axis_i) => {
+            let ndim = data.ndim();
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
+
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            let shape = data.shape();
+            let axis_len = shape[axis];
+
+            if axis_len < 2 {
+                // Result has axis_len - 1 = 0 elements along this axis
+                let mut new_shape = shape.to_vec();
+                new_shape[axis] = 0;
+                return Ok(Obj::wrap(NDArray::new(
+                    ArrayD::from_shape_vec(IxDyn(&new_shape), vec![]).unwrap()
+                )));
+            }
+
+            let mut new_shape = shape.to_vec();
+            new_shape[axis] = axis_len - 1;
+
+            let outer_size: usize = shape[..axis].iter().product();
+            let inner_size: usize = shape[axis+1..].iter().product();
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            let mut result_data = Vec::with_capacity(outer_size.max(1) * (axis_len - 1) * inner_size.max(1));
+
+            for o in 0..outer_size.max(1) {
+                for a in 0..(axis_len - 1) {
+                    for i in 0..inner_size.max(1) {
+                        let idx_curr = o * axis_len * inner_size + a * inner_size + i;
+                        let idx_next = o * axis_len * inner_size + (a + 1) * inner_size + i;
+                        result_data.push(flat[idx_next] - flat[idx_curr]);
+                    }
+                }
+            }
+
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(IxDyn(&new_shape), result_data).unwrap()
+            )))
+        }
     }
-
-    let result: Vec<f64> = flat.windows(2).map(|w| w[1] - w[0]).collect();
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[result.len()]), result).unwrap(),
-    )))
 }
 
 pub fn gradient(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    gradient_axis(arr, None)
+}
+
+/// Gradient with optional axis parameter
+/// axis=None: compute gradient on last axis (for n-dim arrays)
+/// axis=i: compute gradient along axis i
+pub fn gradient_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
+    let shape = data.shape();
+    let ndim = data.ndim();
+
+    if data.is_empty() {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(data.raw_dim()))));
+    }
+
+    // Default to last axis for n-dim arrays
+    let axis_i = axis.unwrap_or(-1);
+    let axis = if axis_i < 0 {
+        (ndim as i64 + axis_i) as usize
+    } else {
+        axis_i as usize
+    };
+
+    if axis >= ndim {
+        return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+    }
+
+    let axis_len = shape[axis];
+
+    if axis_len == 0 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(data.raw_dim()))));
+    }
+    if axis_len == 1 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(data.raw_dim()))));
+    }
+
+    let outer_size: usize = shape[..axis].iter().product();
+    let inner_size: usize = shape[axis+1..].iter().product();
+
     let flat: Vec<f64> = data.iter().cloned().collect();
-    let n = flat.len();
+    let mut result_data = vec![0.0; flat.len()];
 
-    if n == 0 {
-        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    for o in 0..outer_size.max(1) {
+        for i in 0..inner_size.max(1) {
+            // First element: forward difference
+            let idx_0 = o * axis_len * inner_size + 0 * inner_size + i;
+            let idx_1 = o * axis_len * inner_size + 1 * inner_size + i;
+            result_data[idx_0] = flat[idx_1] - flat[idx_0];
+
+            // Interior elements: central difference
+            for a in 1..(axis_len - 1) {
+                let idx_prev = o * axis_len * inner_size + (a - 1) * inner_size + i;
+                let idx_curr = o * axis_len * inner_size + a * inner_size + i;
+                let idx_next = o * axis_len * inner_size + (a + 1) * inner_size + i;
+                result_data[idx_curr] = (flat[idx_next] - flat[idx_prev]) / 2.0;
+            }
+
+            // Last element: backward difference
+            let idx_last = o * axis_len * inner_size + (axis_len - 1) * inner_size + i;
+            let idx_second_last = o * axis_len * inner_size + (axis_len - 2) * inner_size + i;
+            result_data[idx_last] = flat[idx_last] - flat[idx_second_last];
+        }
     }
-    if n == 1 {
-        return Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[1]), vec![0.0]).unwrap(),
-        )));
-    }
-
-    let mut result = vec![0.0; n];
-
-    // First element: forward difference
-    result[0] = flat[1] - flat[0];
-
-    // Interior elements: central difference
-    for i in 1..n-1 {
-        result[i] = (flat[i+1] - flat[i-1]) / 2.0;
-    }
-
-    // Last element: backward difference
-    result[n-1] = flat[n-1] - flat[n-2];
 
     Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(data.raw_dim(), result).unwrap(),
+        ArrayD::from_shape_vec(data.raw_dim(), result_data).unwrap(),
     )))
 }
 

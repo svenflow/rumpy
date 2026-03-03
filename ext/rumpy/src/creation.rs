@@ -167,8 +167,10 @@ pub fn eye_k(n: usize, m: Option<usize>, k: Option<i64>) -> Result<Obj<NDArray>,
 
     let mut data = vec![0.0; n * m];
     for i in 0..n {
-        let j = (i as i64 + k) as usize;
-        if j < m {
+        // Handle negative k without overflow
+        let j_signed = i as i64 + k;
+        if j_signed >= 0 && (j_signed as usize) < m {
+            let j = j_signed as usize;
             data[i * m + j] = 1.0;
         }
     }

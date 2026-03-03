@@ -558,26 +558,41 @@ pub fn histogram(arr: &NDArray, bins: usize) -> Result<RArray, Error> {
     let data = arr.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
 
+    if flat.is_empty() {
+        return Err(Error::new(exception::arg_error(), "Cannot compute histogram of empty array"));
+    }
+
     let min_val = flat.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_val = flat.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let range = max_val - min_val;
 
-    if range == 0.0 {
-        return Err(Error::new(exception::arg_error(), "All values are the same"));
-    }
+    // Handle single value / uniform data case
+    let (bin_width, adjusted_min, adjusted_max) = if range == 0.0 || range.abs() < 1e-14 {
+        // All values are the same - create bins centered around the value
+        // NumPy uses a small range around the value
+        let center = min_val;
+        let half_width = if center == 0.0 { 0.5 } else { center.abs() * 0.5 };
+        (half_width * 2.0 / bins as f64, center - half_width, center + half_width)
+    } else {
+        (range / bins as f64, min_val, max_val)
+    };
 
-    let bin_width = range / bins as f64;
     let mut counts = vec![0.0; bins];
     let mut edges = Vec::with_capacity(bins + 1);
 
     for i in 0..=bins {
-        edges.push(min_val + i as f64 * bin_width);
+        edges.push(adjusted_min + i as f64 * bin_width);
     }
 
     for &x in &flat {
-        let bin = ((x - min_val) / bin_width).floor() as usize;
-        let bin = bin.min(bins - 1);
-        counts[bin] += 1.0;
+        if range == 0.0 || range.abs() < 1e-14 {
+            // All values go in the middle bin
+            counts[bins / 2] += 1.0;
+        } else {
+            let bin = ((x - adjusted_min) / bin_width).floor() as usize;
+            let bin = bin.min(bins - 1);
+            counts[bin] += 1.0;
+        }
     }
 
     let _ruby = magnus::Ruby::get().unwrap();

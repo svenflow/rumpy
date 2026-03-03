@@ -1111,13 +1111,44 @@ pub fn argsort_axis(array: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, 
 }
 
 pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
+    searchsorted_side(array, value, None)
+}
+
+/// Searchsorted with side parameter
+/// side="left" (default): a[i-1] < v <= a[i]
+/// side="right": a[i-1] <= v < a[i]
+pub fn searchsorted_side(array: &NDArray, value: f64, side: Option<String>) -> Result<i64, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
+    let side = side.unwrap_or_else(|| "left".to_string());
 
-    // NaN-safe binary search
-    match flat.binary_search_by(|x| nan_safe_cmp(x, &value)) {
-        Ok(i) => Ok(i as i64),
-        Err(i) => Ok(i as i64),
+    if side == "right" {
+        // Find rightmost position where value could be inserted
+        // This is equivalent to finding first element > value
+        let mut lo = 0;
+        let mut hi = flat.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if nan_safe_cmp(&flat[mid], &value) == std::cmp::Ordering::Greater {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Ok(lo as i64)
+    } else {
+        // "left" - find leftmost position (first element >= value)
+        match flat.binary_search_by(|x| nan_safe_cmp(x, &value)) {
+            Ok(i) => {
+                // Found exact match, go to leftmost occurrence
+                let mut idx = i;
+                while idx > 0 && nan_safe_cmp(&flat[idx - 1], &value) == std::cmp::Ordering::Equal {
+                    idx -= 1;
+                }
+                Ok(idx as i64)
+            }
+            Err(i) => Ok(i as i64),
+        }
     }
 }
 
@@ -1136,21 +1167,68 @@ pub fn unique(array: &NDArray) -> Result<Obj<NDArray>, Error> {
 
 /// Squeeze: remove axes of length 1
 pub fn squeeze(array: &NDArray) -> Result<Obj<NDArray>, Error> {
+    squeeze_axis(array, None)
+}
+
+/// Squeeze with optional axis parameter
+/// axis=None: remove all axes of length 1
+/// axis=i: remove axis i only (must have length 1)
+pub fn squeeze_axis(array: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let new_shape: Vec<usize> = data.shape().iter().filter(|&&s| s != 1).cloned().collect();
+    let shape = data.shape();
+    let ndim = shape.len();
 
-    if new_shape.is_empty() {
-        // Scalar case
-        let val = data.iter().next().cloned().unwrap_or(0.0);
-        return Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[]), vec![val]).unwrap()
-        )));
+    match axis {
+        None => {
+            let new_shape: Vec<usize> = shape.iter().filter(|&&s| s != 1).cloned().collect();
+
+            if new_shape.is_empty() {
+                // Scalar case
+                let val = data.iter().next().cloned().unwrap_or(0.0);
+                return Ok(Obj::wrap(NDArray::new(
+                    ArrayD::from_shape_vec(IxDyn(&[]), vec![val]).unwrap()
+                )));
+            }
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(IxDyn(&new_shape), flat).unwrap()
+            )))
+        }
+        Some(axis_i) => {
+            let axis = if axis_i < 0 {
+                (ndim as i64 + axis_i) as usize
+            } else {
+                axis_i as usize
+            };
+
+            if axis >= ndim {
+                return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds", axis_i)));
+            }
+
+            if shape[axis] != 1 {
+                return Err(Error::new(exception::arg_error(),
+                    format!("cannot select an axis to squeeze out which has size not equal to one, got shape[{}] = {}", axis, shape[axis])));
+            }
+
+            let new_shape: Vec<usize> = shape.iter().enumerate()
+                .filter(|(i, _)| *i != axis)
+                .map(|(_, &s)| s)
+                .collect();
+
+            if new_shape.is_empty() {
+                let val = data.iter().next().cloned().unwrap_or(0.0);
+                return Ok(Obj::wrap(NDArray::new(
+                    ArrayD::from_shape_vec(IxDyn(&[]), vec![val]).unwrap()
+                )));
+            }
+
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            Ok(Obj::wrap(NDArray::new(
+                ArrayD::from_shape_vec(IxDyn(&new_shape), flat).unwrap()
+            )))
+        }
     }
-
-    let flat: Vec<f64> = data.iter().cloned().collect();
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&new_shape), flat).unwrap()
-    )))
 }
 
 /// Take elements from array along an axis
@@ -1281,6 +1359,163 @@ pub fn pad(array: &NDArray, pad_width: usize, constant_value: f64) -> Result<Obj
         // Get new flat index
         let new_flat_idx = flat_index(&new_idx, &new_shape);
         result[new_flat_idx] = old_flat[old_flat_idx];
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&new_shape), result).unwrap()
+    )))
+}
+
+/// Expand the shape of an array by inserting a new axis at the specified position
+pub fn expand_dims(array: &NDArray, axis: i64) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let shape = data.shape();
+    let ndim = shape.len();
+
+    // Normalize axis (can be 0 to ndim inclusive for insertion)
+    let axis = if axis < 0 {
+        (ndim as i64 + 1 + axis) as usize
+    } else {
+        axis as usize
+    };
+
+    if axis > ndim {
+        return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds for array of dimension {}", axis, ndim)));
+    }
+
+    let mut new_shape = shape.to_vec();
+    new_shape.insert(axis, 1);
+
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&new_shape), flat).unwrap()
+    )))
+}
+
+/// Interchange two axes of an array
+pub fn swapaxes(array: &NDArray, axis1: i64, axis2: i64) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let shape = data.shape();
+    let ndim = shape.len();
+
+    // Normalize axes
+    let axis1 = if axis1 < 0 { (ndim as i64 + axis1) as usize } else { axis1 as usize };
+    let axis2 = if axis2 < 0 { (ndim as i64 + axis2) as usize } else { axis2 as usize };
+
+    if axis1 >= ndim || axis2 >= ndim {
+        return Err(Error::new(exception::arg_error(), "axis out of bounds"));
+    }
+
+    if axis1 == axis2 {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
+
+    // Create permutation array
+    let mut perm: Vec<usize> = (0..ndim).collect();
+    perm.swap(axis1, axis2);
+
+    // Compute new shape
+    let mut new_shape = shape.to_vec();
+    new_shape.swap(axis1, axis2);
+
+    // Reorder data
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let total_size = flat.len();
+    let mut result = vec![0.0; total_size];
+
+    // For each output position, compute the input position
+    for out_flat_idx in 0..total_size {
+        // Convert flat index to multi-dim index in output shape
+        let mut remaining = out_flat_idx;
+        let mut out_idx = vec![0usize; ndim];
+        for d in (0..ndim).rev() {
+            out_idx[d] = remaining % new_shape[d];
+            remaining /= new_shape[d];
+        }
+
+        // Apply inverse permutation to get input index
+        let mut in_idx = vec![0usize; ndim];
+        for d in 0..ndim {
+            in_idx[perm[d]] = out_idx[d];
+        }
+
+        // Convert input index to flat
+        let mut in_flat_idx = 0;
+        let mut stride = 1;
+        for d in (0..ndim).rev() {
+            in_flat_idx += in_idx[d] * stride;
+            stride *= shape[d];
+        }
+
+        result[out_flat_idx] = flat[in_flat_idx];
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&new_shape), result).unwrap()
+    )))
+}
+
+/// Move axes of an array to new positions
+pub fn moveaxis(array: &NDArray, source: i64, destination: i64) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let shape = data.shape();
+    let ndim = shape.len();
+
+    // Normalize axes
+    let src = if source < 0 { (ndim as i64 + source) as usize } else { source as usize };
+    let dst = if destination < 0 { (ndim as i64 + destination) as usize } else { destination as usize };
+
+    if src >= ndim || dst >= ndim {
+        return Err(Error::new(exception::arg_error(), "axis out of bounds"));
+    }
+
+    if src == dst {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
+
+    // Build permutation: remove src from its position and insert at dst
+    let mut perm: Vec<usize> = (0..ndim).collect();
+    let removed = perm.remove(src);
+    perm.insert(dst, removed);
+
+    // Compute new shape
+    let new_shape: Vec<usize> = perm.iter().map(|&i| shape[i]).collect();
+
+    // Compute inverse permutation for data reordering
+    let mut inv_perm = vec![0usize; ndim];
+    for (i, &p) in perm.iter().enumerate() {
+        inv_perm[p] = i;
+    }
+
+    // Reorder data
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let total_size = flat.len();
+    let mut result = vec![0.0; total_size];
+
+    for out_flat_idx in 0..total_size {
+        // Convert flat index to multi-dim index in output shape
+        let mut remaining = out_flat_idx;
+        let mut out_idx = vec![0usize; ndim];
+        for d in (0..ndim).rev() {
+            out_idx[d] = remaining % new_shape[d];
+            remaining /= new_shape[d];
+        }
+
+        // Apply inverse permutation to get input index
+        let mut in_idx = vec![0usize; ndim];
+        for d in 0..ndim {
+            in_idx[perm[d]] = out_idx[d];
+        }
+
+        // Convert input index to flat
+        let mut in_flat_idx = 0;
+        let mut stride = 1;
+        for d in (0..ndim).rev() {
+            in_flat_idx += in_idx[d] * stride;
+            stride *= shape[d];
+        }
+
+        result[out_flat_idx] = flat[in_flat_idx];
     }
 
     Ok(Obj::wrap(NDArray::new(
