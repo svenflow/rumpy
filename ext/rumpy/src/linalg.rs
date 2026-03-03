@@ -250,97 +250,36 @@ pub fn cond(arr: &NDArray) -> Result<f64, Error> {
     Ok(norm_a * norm_inv)
 }
 
-/// Eigenvalues and eigenvectors (power iteration - simplified)
-pub fn eig(arr: &NDArray) -> Result<RArray, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "eig requires 2D array"));
-    }
-
-    let shape = data.shape();
-    if shape[0] != shape[1] {
-        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
-    }
-
-    // For now, return placeholder
-    // Real implementation would use QR algorithm
-    let n = shape[0];
-    let eigenvalues = vec![0.0; n];
-    let eigenvectors = vec![0.0; n * n];
-
-    let result = RArray::new();
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n]), eigenvalues).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), eigenvectors).unwrap(),
-    )))?;
-
-    Ok(result)
+/// Eigenvalues and eigenvectors
+/// Note: Full implementation requires QR algorithm or external LAPACK
+pub fn eig(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eig not fully implemented - requires LAPACK or similar library for accurate eigendecomposition"))
 }
 
 /// Eigenvalues only
-pub fn eigvals(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "eigvals requires 2D array"));
-    }
-
-    let shape = data.shape();
-    if shape[0] != shape[1] {
-        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
-    }
-
-    let n = shape[0];
-    let eigenvalues = vec![0.0; n];  // Placeholder
-
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n]), eigenvalues).unwrap(),
-    )))
+pub fn eigvals(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigvals not fully implemented - requires LAPACK or similar library"))
 }
 
 /// Eigenvalues/vectors for symmetric matrix
-pub fn eigh(arr: &NDArray) -> Result<RArray, Error> {
-    eig(arr)
+pub fn eigh(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigh not fully implemented - requires LAPACK or similar library"))
 }
 
 /// Eigenvalues for symmetric matrix
-pub fn eigvalsh(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    eigvals(arr)
+pub fn eigvalsh(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigvalsh not fully implemented - requires LAPACK or similar library"))
 }
 
-/// Singular Value Decomposition (simplified)
-pub fn svd(arr: &NDArray) -> Result<RArray, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "svd requires 2D array"));
-    }
-
-    let shape = data.shape();
-    let m = shape[0];
-    let n = shape[1];
-    let k = m.min(n);
-
-    // Placeholder implementation
-    let u = vec![0.0; m * m];
-    let s = vec![0.0; k];
-    let vt = vec![0.0; n * n];
-
-    let result = RArray::new();
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[m, m]), u).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[k]), s).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), vt).unwrap(),
-    )))?;
-
-    Ok(result)
+/// Singular Value Decomposition
+/// Note: Full implementation requires iterative algorithms or LAPACK
+pub fn svd(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "svd not fully implemented - requires LAPACK or similar library for accurate SVD"))
 }
 
 /// QR decomposition

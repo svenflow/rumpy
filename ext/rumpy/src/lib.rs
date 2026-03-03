@@ -134,6 +134,19 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("cumsum", function!(stats::cumsum, 1))?;
     rumpy.define_singleton_method("cumprod", function!(stats::cumprod, 1))?;
     rumpy.define_singleton_method("median", function!(stats::median, 1))?;
+    // NaN-ignoring aggregations
+    rumpy.define_singleton_method("nansum", function!(stats::nansum, 1))?;
+    rumpy.define_singleton_method("nanmean", function!(stats::nanmean, 1))?;
+    rumpy.define_singleton_method("nanvar", function!(stats::nanvar, 1))?;
+    rumpy.define_singleton_method("nanstd", function!(stats::nanstd, 1))?;
+    rumpy.define_singleton_method("nanmin", function!(stats::nanmin, 1))?;
+    rumpy.define_singleton_method("nanmax", function!(stats::nanmax, 1))?;
+    rumpy.define_singleton_method("nanargmin", function!(stats::nanargmin, 1))?;
+    rumpy.define_singleton_method("nanargmax", function!(stats::nanargmax, 1))?;
+    rumpy.define_singleton_method("nanprod", function!(stats::nanprod, 1))?;
+    rumpy.define_singleton_method("nancumsum", function!(stats::nancumsum, 1))?;
+    rumpy.define_singleton_method("nancumprod", function!(stats::nancumprod, 1))?;
+    rumpy.define_singleton_method("nanmedian", function!(stats::nanmedian, 1))?;
     rumpy.define_singleton_method("percentile", function!(stats::percentile, 2))?;
     rumpy.define_singleton_method("quantile", function!(stats::quantile, 2))?;
     rumpy.define_singleton_method("histogram", function!(stats::histogram, 2))?;

@@ -633,39 +633,39 @@ pub fn flatnonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     nonzero(arr)
 }
 
-// FFT (placeholder implementations - would need rustfft for real implementation)
+// FFT - Not implemented (requires complex number support and rustfft crate)
+// These functions now return errors instead of silently returning incorrect results
 
-pub fn fft(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    // Placeholder - returns input (would need complex number support)
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn fft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "FFT not implemented - requires complex number support"))
 }
 
-pub fn ifft(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn ifft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "IFFT not implemented - requires complex number support"))
 }
 
-pub fn fft2(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn fft2(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "FFT2 not implemented - requires complex number support"))
 }
 
-pub fn ifft2(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn ifft2(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "IFFT2 not implemented - requires complex number support"))
 }
 
-pub fn fftn(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn fftn(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "FFTN not implemented - requires complex number support"))
 }
 
-pub fn ifftn(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn ifftn(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "IFFTN not implemented - requires complex number support"))
 }
 
-pub fn rfft(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn rfft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "RFFT not implemented - requires complex number support"))
 }
 
-pub fn irfft(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Ok(Obj::wrap(NDArray::new(arr.get_data().clone())))
+pub fn irfft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(), "IRFFT not implemented - requires complex number support"))
 }
 
 pub fn fftfreq(n: usize, d: f64) -> Result<Obj<NDArray>, Error> {

@@ -458,7 +458,18 @@ pub fn vstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn hstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
-    concatenate(arrays, Some(-1))
+    // NumPy hstack: concatenate along axis 1 for 2D+, axis 0 for 1D
+    // Check first array's dimensions
+    let first: &NDArray = arrays.entry(0)
+        .map_err(|_| Error::new(exception::arg_error(), "Need at least one array"))?
+        .try_convert()
+        .map_err(|_| Error::new(exception::type_error(), "Expected NDArray"))?;
+
+    if first.get_data().ndim() == 1 {
+        concatenate(arrays, Some(0))
+    } else {
+        concatenate(arrays, Some(1))
+    }
 }
 
 pub fn dstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
@@ -571,9 +582,12 @@ pub fn repeat(array: &NDArray, repeats: i64) -> Result<Obj<NDArray>, Error> {
 
 pub fn flip(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let mut flat: Vec<f64> = data.iter().cloned().collect();
-    flat.reverse();
-    Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), flat).unwrap())))
+    // NumPy flip: reverse along all axes
+    let mut result = data.clone();
+    for axis in 0..result.ndim() {
+        result.invert_axis(Axis(axis));
+    }
+    Ok(Obj::wrap(NDArray::new(result)))
 }
 
 pub fn fliplr(array: &NDArray) -> Result<Obj<NDArray>, Error> {
@@ -624,10 +638,21 @@ pub fn rot90(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Helper for NaN-safe comparison (NaN sorts to end, like NumPy)
+fn nan_safe_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,  // NaN goes to end
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
 pub fn sort(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let mut flat: Vec<f64> = data.iter().cloned().collect();
-    flat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // NaN-safe sort: NaN values go to end (NumPy behavior)
+    flat.sort_by(nan_safe_cmp);
     Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), flat).unwrap())))
 }
 
@@ -635,7 +660,8 @@ pub fn argsort(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
     let mut indices: Vec<usize> = (0..flat.len()).collect();
-    indices.sort_by(|&a, &b| flat[a].partial_cmp(&flat[b]).unwrap());
+    // NaN-safe argsort
+    indices.sort_by(|&a, &b| nan_safe_cmp(&flat[a], &flat[b]));
     let result: Vec<f64> = indices.iter().map(|&i| i as f64).collect();
     Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(data.raw_dim(), result).unwrap())))
 }
@@ -644,7 +670,8 @@ pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
 
-    match flat.binary_search_by(|x| x.partial_cmp(&value).unwrap()) {
+    // NaN-safe binary search
+    match flat.binary_search_by(|x| nan_safe_cmp(x, &value)) {
         Ok(i) => Ok(i as i64),
         Err(i) => Ok(i as i64),
     }
@@ -653,8 +680,13 @@ pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
 pub fn unique(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let mut flat: Vec<f64> = data.iter().cloned().collect();
-    flat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    flat.dedup();
+    // NaN-safe sort
+    flat.sort_by(nan_safe_cmp);
+    // NaN-safe dedup (treat all NaN as equal)
+    flat.dedup_by(|a, b| {
+        if a.is_nan() && b.is_nan() { true }
+        else { a == b }
+    });
     Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[flat.len()]), flat).unwrap())))
 }
 

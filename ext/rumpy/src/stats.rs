@@ -97,17 +97,31 @@ pub fn cumprod(arr: &NDArray) -> Obj<NDArray> {
     ))
 }
 
+/// Helper for NaN-safe comparison (NaN sorts to end)
+fn nan_safe_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
 pub fn median(arr: &NDArray) -> f64 {
     let data = arr.get_data();
     let mut sorted: Vec<f64> = data.iter().cloned().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // NaN-safe sort
+    sorted.sort_by(nan_safe_cmp);
 
     let n = sorted.len();
     if n == 0 {
         return f64::NAN;
     }
+    // If there are NaN values, they're at the end - median may be NaN
     if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        let a = sorted[n / 2 - 1];
+        let b = sorted[n / 2];
+        if a.is_nan() || b.is_nan() { f64::NAN } else { (a + b) / 2.0 }
     } else {
         sorted[n / 2]
     }
@@ -120,7 +134,8 @@ pub fn percentile(arr: &NDArray, q: f64) -> f64 {
 pub fn quantile(arr: &NDArray, q: f64) -> f64 {
     let data = arr.get_data();
     let mut sorted: Vec<f64> = data.iter().cloned().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // NaN-safe sort
+    sorted.sort_by(nan_safe_cmp);
 
     if sorted.is_empty() {
         return f64::NAN;
@@ -264,6 +279,132 @@ pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(IxDyn(&[n_vars, n_vars]), cov).unwrap(),
     )))
+}
+
+// NaN-ignoring aggregation functions
+
+pub fn nansum(arr: &NDArray) -> f64 {
+    arr.get_data().iter().filter(|x| !x.is_nan()).sum()
+}
+
+pub fn nanmean(arr: &NDArray) -> f64 {
+    let data = arr.get_data();
+    let non_nan: Vec<f64> = data.iter().filter(|x| !x.is_nan()).cloned().collect();
+    if non_nan.is_empty() {
+        f64::NAN
+    } else {
+        non_nan.iter().sum::<f64>() / non_nan.len() as f64
+    }
+}
+
+pub fn nanvar(arr: &NDArray) -> f64 {
+    let data = arr.get_data();
+    let non_nan: Vec<f64> = data.iter().filter(|x| !x.is_nan()).cloned().collect();
+    if non_nan.is_empty() {
+        return f64::NAN;
+    }
+    let m = non_nan.iter().sum::<f64>() / non_nan.len() as f64;
+    non_nan.iter().map(|x| (x - m).powi(2)).sum::<f64>() / non_nan.len() as f64
+}
+
+pub fn nanstd(arr: &NDArray) -> f64 {
+    nanvar(arr).sqrt()
+}
+
+pub fn nanmin(arr: &NDArray) -> f64 {
+    let data = arr.get_data();
+    data.iter()
+        .filter(|x| !x.is_nan())
+        .cloned()
+        .fold(f64::INFINITY, f64::min)
+}
+
+pub fn nanmax(arr: &NDArray) -> f64 {
+    let data = arr.get_data();
+    data.iter()
+        .filter(|x| !x.is_nan())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+pub fn nanargmin(arr: &NDArray) -> Result<usize, Error> {
+    let data = arr.get_data();
+    let result = data.iter()
+        .enumerate()
+        .filter(|(_, x)| !x.is_nan())
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    match result {
+        Some((i, _)) => Ok(i),
+        None => Err(Error::new(exception::arg_error(), "All-NaN slice encountered")),
+    }
+}
+
+pub fn nanargmax(arr: &NDArray) -> Result<usize, Error> {
+    let data = arr.get_data();
+    let result = data.iter()
+        .enumerate()
+        .filter(|(_, x)| !x.is_nan())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    match result {
+        Some((i, _)) => Ok(i),
+        None => Err(Error::new(exception::arg_error(), "All-NaN slice encountered")),
+    }
+}
+
+pub fn nanprod(arr: &NDArray) -> f64 {
+    arr.get_data().iter().filter(|x| !x.is_nan()).product()
+}
+
+pub fn nancumsum(arr: &NDArray) -> Obj<NDArray> {
+    let data = arr.get_data();
+    let mut sum = 0.0;
+    let result: Vec<f64> = data
+        .iter()
+        .map(|&x| {
+            if !x.is_nan() {
+                sum += x;
+            }
+            sum
+        })
+        .collect();
+    Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(data.raw_dim(), result).unwrap(),
+    ))
+}
+
+pub fn nancumprod(arr: &NDArray) -> Obj<NDArray> {
+    let data = arr.get_data();
+    let mut prod = 1.0;
+    let result: Vec<f64> = data
+        .iter()
+        .map(|&x| {
+            if !x.is_nan() {
+                prod *= x;
+            }
+            prod
+        })
+        .collect();
+    Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(data.raw_dim(), result).unwrap(),
+    ))
+}
+
+pub fn nanmedian(arr: &NDArray) -> f64 {
+    let data = arr.get_data();
+    let mut sorted: Vec<f64> = data.iter().filter(|x| !x.is_nan()).cloned().collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    }
 }
 
 /// Trapezoidal integration
