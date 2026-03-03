@@ -483,7 +483,79 @@ pub fn matmul(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn inner(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
-    dot(a, b)
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    // 1D case: standard inner product
+    if a_data.ndim() == 1 && b_data.ndim() == 1 {
+        return dot(a, b);
+    }
+
+    // For higher-dimensional arrays, NumPy's inner sums over the last axis of both arrays
+    // Result shape: a.shape[:-1] + b.shape[:-1]
+    let a_shape = a_data.shape();
+    let b_shape = b_data.shape();
+    let a_ndim = a_shape.len();
+    let b_ndim = b_shape.len();
+
+    // The last dimensions must match
+    if a_shape[a_ndim - 1] != b_shape[b_ndim - 1] {
+        return Err(Error::new(
+            exception::arg_error(),
+            format!("shape mismatch: last dimensions {} and {} must match",
+                    a_shape[a_ndim - 1], b_shape[b_ndim - 1]),
+        ));
+    }
+
+    let contract_dim = a_shape[a_ndim - 1];
+
+    // Build result shape
+    let mut result_shape: Vec<usize> = Vec::new();
+    for i in 0..(a_ndim - 1) {
+        result_shape.push(a_shape[i]);
+    }
+    for i in 0..(b_ndim - 1) {
+        result_shape.push(b_shape[i]);
+    }
+
+    // Compute sizes
+    let a_outer_size: usize = a_shape[..a_ndim - 1].iter().product::<usize>().max(1);
+    let b_outer_size: usize = b_shape[..b_ndim - 1].iter().product::<usize>().max(1);
+    let result_size = (a_outer_size * b_outer_size).max(1);
+
+    let a_flat: Vec<f64> = a_data.iter().cloned().collect();
+    let b_flat: Vec<f64> = b_data.iter().cloned().collect();
+
+    let mut result_data = vec![0.0; result_size];
+
+    for a_outer in 0..a_outer_size {
+        for b_outer in 0..b_outer_size {
+            let mut sum = 0.0;
+            for k in 0..contract_dim {
+                let a_idx = a_outer * contract_dim + k;
+                let b_idx = b_outer * contract_dim + k;
+                if a_idx < a_flat.len() && b_idx < b_flat.len() {
+                    sum += a_flat[a_idx] * b_flat[b_idx];
+                }
+            }
+            let result_idx = a_outer * b_outer_size + b_outer;
+            if result_idx < result_data.len() {
+                result_data[result_idx] = sum;
+            }
+        }
+    }
+
+    // Handle scalar result
+    if result_shape.is_empty() {
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[]), result_data).unwrap(),
+        )));
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&result_shape), result_data)
+            .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?,
+    )))
 }
 
 pub fn outer(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
@@ -552,18 +624,101 @@ pub fn cross(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
 }
 
 pub fn tensordot(a: &NDArray, b: &NDArray, axes: i64) -> Result<Obj<NDArray>, Error> {
-    // Simplified tensordot - just handles the common cases
-    if axes == 1 {
-        return matmul(a, b);
-    }
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+    let a_shape = a_data.shape();
+    let b_shape = b_data.shape();
+    let a_ndim = a_shape.len();
+    let b_ndim = b_shape.len();
+
+    // Handle axes=0: outer product
     if axes == 0 {
         return outer(a, b);
     }
 
-    Err(Error::new(
-        exception::arg_error(),
-        "tensordot only supports axes=0 or axes=1",
-    ))
+    // Handle axes=1: simple matrix multiplication case
+    if axes == 1 && a_ndim == 2 && b_ndim == 2 {
+        return matmul(a, b);
+    }
+
+    let axes = axes as usize;
+
+    // Validate axes
+    if axes > a_ndim || axes > b_ndim {
+        return Err(Error::new(
+            exception::arg_error(),
+            format!("axes {} is too large for arrays with {} and {} dimensions", axes, a_ndim, b_ndim),
+        ));
+    }
+
+    // Check that the contracting dimensions match
+    for i in 0..axes {
+        let a_dim = a_shape[a_ndim - axes + i];
+        let b_dim = b_shape[i];
+        if a_dim != b_dim {
+            return Err(Error::new(
+                exception::arg_error(),
+                format!("shape mismatch: {} vs {} for contraction axis {}", a_dim, b_dim, i),
+            ));
+        }
+    }
+
+    // Compute result shape: a_shape[:-axes] + b_shape[axes:]
+    let mut result_shape: Vec<usize> = Vec::new();
+    for i in 0..(a_ndim - axes) {
+        result_shape.push(a_shape[i]);
+    }
+    for i in axes..b_ndim {
+        result_shape.push(b_shape[i]);
+    }
+
+    // Size of the contracting dimensions
+    let contract_size: usize = (0..axes).map(|i| b_shape[i]).product();
+
+    // Size of the outer dimensions for a and b
+    let a_outer_size: usize = (0..(a_ndim - axes)).map(|i| a_shape[i]).product();
+    let b_outer_size: usize = (axes..b_ndim).map(|i| b_shape[i]).product();
+
+    // Flatten arrays for computation
+    let a_flat: Vec<f64> = a_data.iter().cloned().collect();
+    let b_flat: Vec<f64> = b_data.iter().cloned().collect();
+
+    let mut result_data = vec![0.0; a_outer_size * b_outer_size];
+
+    // Compute tensordot by iterating over all combinations
+    // This is a general but not optimized implementation
+    for a_outer in 0..a_outer_size.max(1) {
+        for b_outer in 0..b_outer_size.max(1) {
+            let mut sum = 0.0;
+            for contract in 0..contract_size.max(1) {
+                // Map a_outer and contract to flat index in a
+                let a_idx = a_outer * contract_size + contract;
+                // Map contract and b_outer to flat index in b
+                let b_idx = contract * b_outer_size + b_outer;
+
+                if a_idx < a_flat.len() && b_idx < b_flat.len() {
+                    sum += a_flat[a_idx] * b_flat[b_idx];
+                }
+            }
+            let result_idx = a_outer * b_outer_size + b_outer;
+            if result_idx < result_data.len() {
+                result_data[result_idx] = sum;
+            }
+        }
+    }
+
+    // Handle scalar result
+    if result_shape.is_empty() {
+        result_shape.push(1);
+        if result_data.is_empty() {
+            result_data.push(0.0);
+        }
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&result_shape), result_data)
+            .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?,
+    )))
 }
 
 // Logical operations

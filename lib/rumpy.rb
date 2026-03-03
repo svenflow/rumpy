@@ -18,9 +18,8 @@ module RumPy
     end
 
     def full_like(arr, value)
-      result = zeros_like(arr)
-      # Would need to implement fill
-      result
+      arr = array(arr) unless arr.is_a?(NDArray)
+      full(arr.shape, value)
     end
 
     # Axis-aware aggregations with proper axis/keepdims support
@@ -128,7 +127,6 @@ module RumPy
     class << self
       # Common aliases
       alias_method :matrix_rank, :rank
-      alias_method :matrix_power, :matmul
     end
   end
 

@@ -123,18 +123,21 @@ RSpec.describe "RumPy::Linalg" do
   end
 
   describe "lu" do
-    it "computes LU decomposition" do
+    it "computes LU decomposition with partial pivoting" do
       arr = RumPy.array([[2, 1], [4, 3]])
-      l, u = RumPy::Linalg.lu(arr)
+      p, l, u = RumPy::Linalg.lu(arr)
 
       # L should be lower triangular with 1s on diagonal
       expect(l[[0, 0]]).to be_within(1e-10).of(1.0)
       expect(l[[1, 1]]).to be_within(1e-10).of(1.0)
 
-      # L * U should equal original
-      product = RumPy.matmul(l, u)
-      expect(product[[0, 0]]).to be_within(1e-10).of(2.0)
-      expect(product[[1, 1]]).to be_within(1e-10).of(3.0)
+      # P * A should equal L * U
+      pa = RumPy.matmul(p, arr)
+      lu = RumPy.matmul(l, u)
+      expect(pa[[0, 0]]).to be_within(1e-10).of(lu[[0, 0]])
+      expect(pa[[0, 1]]).to be_within(1e-10).of(lu[[0, 1]])
+      expect(pa[[1, 0]]).to be_within(1e-10).of(lu[[1, 0]])
+      expect(pa[[1, 1]]).to be_within(1e-10).of(lu[[1, 1]])
     end
   end
 end

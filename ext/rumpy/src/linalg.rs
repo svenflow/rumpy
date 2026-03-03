@@ -598,6 +598,66 @@ pub fn lstsq(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     matmul(&ata_inv, &atb)
 }
 
+/// Matrix power (raise square matrix to integer power)
+pub fn matrix_power(arr: &NDArray, n: i64) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+
+    if data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "matrix_power requires 2D array"));
+    }
+
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
+    }
+
+    let size = shape[0];
+
+    // Handle special cases
+    if n == 0 {
+        // Return identity matrix
+        let mut result = vec![0.0; size * size];
+        for i in 0..size {
+            result[i * size + i] = 1.0;
+        }
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[size, size]), result).unwrap(),
+        )));
+    }
+
+    if n == 1 {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
+
+    if n < 0 {
+        // For negative powers, compute inverse first
+        let arr_inv = inv(arr)?;
+        return matrix_power(&arr_inv, -n);
+    }
+
+    // For positive n, use repeated squaring (exponentiation by squaring)
+    let mut result_data = vec![0.0; size * size];
+    for i in 0..size {
+        result_data[i * size + i] = 1.0;
+    }
+    let mut result = Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[size, size]), result_data).unwrap(),
+    ));
+
+    let mut base = Obj::wrap(NDArray::new(data.clone()));
+    let mut exp = n;
+
+    while exp > 0 {
+        if exp % 2 == 1 {
+            result = matmul(&result, &base)?;
+        }
+        base = matmul(&base, &base)?;
+        exp /= 2;
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

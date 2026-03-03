@@ -214,6 +214,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     linalg_mod.define_singleton_method("lu", function!(linalg::lu, 1))?;
     linalg_mod.define_singleton_method("solve", function!(linalg::solve, 2))?;
     linalg_mod.define_singleton_method("lstsq", function!(linalg::lstsq, 2))?;
+    linalg_mod.define_singleton_method("matrix_power", function!(linalg::matrix_power, 2))?;
 
     // Random submodule
     let random_mod = rumpy.define_module("Random")?;

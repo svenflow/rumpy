@@ -386,6 +386,9 @@ impl NDArray {
 
     pub fn mean(&self) -> f64 {
         let data = self.data.borrow();
+        if data.is_empty() {
+            return f64::NAN;
+        }
         data.sum() / data.len() as f64
     }
 
@@ -440,11 +443,17 @@ impl NDArray {
     }
 
     pub fn all(&self) -> bool {
-        self.data.borrow().iter().all(|&x| x != 0.0)
+        // NumPy treats NaN as truthy (non-zero)
+        // We explicitly check is_nan() to handle NaN correctly even though
+        // NaN != 0.0 would also be true in IEEE 754 semantics
+        self.data.borrow().iter().all(|&x| x != 0.0 || x.is_nan())
     }
 
     pub fn any(&self) -> bool {
-        self.data.borrow().iter().any(|&x| x != 0.0)
+        // NumPy treats NaN as truthy (non-zero)
+        // We explicitly check is_nan() to handle NaN correctly even though
+        // NaN != 0.0 would also be true in IEEE 754 semantics
+        self.data.borrow().iter().any(|&x| x != 0.0 || x.is_nan())
     }
 
     /// Get internal data reference (for other modules)
@@ -708,22 +717,24 @@ pub fn dstack(arrays: RArray) -> Result<Obj<NDArray>, Error> {
 
     for item in arrays.into_iter() {
         let arr = <&NDArray>::try_convert(item)?;
-        let data = arr.get_data().clone();
+        let data = arr.get_data();
         let shape = data.shape().to_vec();
 
         let promoted = if shape.len() == 1 {
-            // 1D -> (1, N, 1)
+            // 1D -> (1, N, 1) - construct manually to avoid memory layout issues
             let n = shape[0];
-            data.into_shape(IxDyn(&[1, n, 1]))
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            ArrayD::from_shape_vec(IxDyn(&[1, n, 1]), flat)
                 .map_err(|e| Error::new(exception::arg_error(), format!("Cannot reshape: {}", e)))?
         } else if shape.len() == 2 {
-            // 2D -> (M, N, 1)
+            // 2D -> (M, N, 1) - construct manually to avoid memory layout issues
             let m = shape[0];
             let n = shape[1];
-            data.into_shape(IxDyn(&[m, n, 1]))
+            let flat: Vec<f64> = data.iter().cloned().collect();
+            ArrayD::from_shape_vec(IxDyn(&[m, n, 1]), flat)
                 .map_err(|e| Error::new(exception::arg_error(), format!("Cannot reshape: {}", e)))?
         } else {
-            data
+            data.clone()
         };
         arr_vec.push(promoted);
     }
@@ -1229,38 +1240,50 @@ pub fn put(array: &NDArray, indices: &NDArray, values: &NDArray) -> Result<Obj<N
 /// Pad array with constant values
 pub fn pad(array: &NDArray, pad_width: usize, constant_value: f64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
-    let shape = data.shape();
+    let shape = data.shape().to_vec();
+    let ndim = shape.len();
 
-    // Simple case: 1D padding
-    if data.ndim() == 1 {
-        let n = shape[0];
-        let new_len = n + 2 * pad_width;
-        let mut result = vec![constant_value; new_len];
-        for (i, &val) in data.iter().enumerate() {
-            result[pad_width + i] = val;
+    // Compute new shape
+    let new_shape: Vec<usize> = shape.iter().map(|&s| s + 2 * pad_width).collect();
+    let new_size: usize = new_shape.iter().product();
+
+    // Initialize result with constant value
+    let mut result = vec![constant_value; new_size];
+
+    // Helper to convert multi-dim index to flat index
+    let flat_index = |idx: &[usize], shape: &[usize]| -> usize {
+        let mut flat = 0;
+        let mut stride = 1;
+        for i in (0..shape.len()).rev() {
+            flat += idx[i] * stride;
+            stride *= shape[i];
         }
-        return Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[new_len]), result).unwrap()
-        )));
+        flat
+    };
+
+    // Iterate over original array and place values in padded array
+    let old_flat: Vec<f64> = data.iter().cloned().collect();
+    let old_size = old_flat.len();
+
+    // Convert flat index to multi-dimensional index
+    for old_flat_idx in 0..old_size {
+        // Convert flat index to old multi-dim index
+        let mut remaining = old_flat_idx;
+        let mut old_idx = vec![0usize; ndim];
+        for d in (0..ndim).rev() {
+            old_idx[d] = remaining % shape[d];
+            remaining /= shape[d];
+        }
+
+        // Compute new index (offset by pad_width in each dimension)
+        let new_idx: Vec<usize> = old_idx.iter().map(|&i| i + pad_width).collect();
+
+        // Get new flat index
+        let new_flat_idx = flat_index(&new_idx, &new_shape);
+        result[new_flat_idx] = old_flat[old_flat_idx];
     }
 
-    // 2D padding
-    if data.ndim() == 2 {
-        let (h, w) = (shape[0], shape[1]);
-        let new_h = h + 2 * pad_width;
-        let new_w = w + 2 * pad_width;
-        let mut result = vec![constant_value; new_h * new_w];
-
-        for i in 0..h {
-            for j in 0..w {
-                result[(pad_width + i) * new_w + (pad_width + j)] = data[[i, j]];
-            }
-        }
-
-        return Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[new_h, new_w]), result).unwrap()
-        )));
-    }
-
-    Err(Error::new(exception::arg_error(), "pad only supports 1D and 2D arrays"))
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&new_shape), result).unwrap()
+    )))
 }

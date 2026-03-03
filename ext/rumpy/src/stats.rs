@@ -83,6 +83,9 @@ pub fn prod_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
 
 pub fn mean(arr: &NDArray) -> f64 {
     let data = arr.get_data();
+    if data.is_empty() {
+        return f64::NAN;
+    }
     data.sum() / data.len() as f64
 }
 
@@ -304,25 +307,27 @@ pub fn argmin_axis(arr: &NDArray, axis: Option<i64>) -> Result<Value, Error> {
             let outer_size: usize = shape[..axis].iter().product();
             let inner_size: usize = shape[axis+1..].iter().product();
 
-            let mut result_data = Vec::with_capacity(outer_size * inner_size);
+            let mut result_data: Vec<i64> = Vec::with_capacity(outer_size * inner_size);
             let flat: Vec<f64> = data.iter().cloned().collect();
 
             for o in 0..outer_size.max(1) {
                 for i in 0..inner_size.max(1) {
                     let mut min_val = f64::INFINITY;
-                    let mut min_idx = 0usize;
+                    let mut min_idx = 0i64;
                     for a in 0..axis_len {
                         let flat_idx = o * axis_len * inner_size + a * inner_size + i;
                         if flat_idx < flat.len() && flat[flat_idx] < min_val {
                             min_val = flat[flat_idx];
-                            min_idx = a;
+                            min_idx = a as i64;
                         }
                     }
-                    result_data.push(min_idx as f64);
+                    result_data.push(min_idx);
                 }
             }
 
-            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), result_data)
+            // Return NDArray with integer values stored as f64 for consistency
+            let float_data: Vec<f64> = result_data.iter().map(|&x| x as f64).collect();
+            let result = ArrayD::from_shape_vec(IxDyn(&new_shape), float_data)
                 .map_err(|e| Error::new(exception::arg_error(), format!("{}", e)))?;
             Ok(Obj::wrap(NDArray::new(result)).into_value_with(&ruby))
         }
