@@ -315,9 +315,20 @@ impl NDArray {
         Obj::wrap(NDArray::new(data.clone()))
     }
 
-    /// Convert to different dtype (placeholder - only float64 for now)
-    pub fn astype(&self, _dtype: String) -> Obj<NDArray> {
-        self.copy()
+    /// Convert to different dtype.
+    ///
+    /// # NotImplementedError
+    /// Currently only float64 is supported. This method raises NotImplementedError
+    /// for any dtype conversion other than "float64".
+    pub fn astype(&self, dtype: String) -> Result<Obj<NDArray>, Error> {
+        if dtype == "float64" || dtype == "f64" || dtype == "double" {
+            Ok(self.copy())
+        } else {
+            Err(Error::new(
+                exception::not_imp_error(),
+                format!("dtype conversion to '{}' not implemented - only float64 is currently supported", dtype)
+            ))
+        }
     }
 
     // Arithmetic operations
@@ -786,6 +797,10 @@ pub fn stack(arrays: RArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Split an array into multiple sub-arrays.
+///
+/// Currently only supports splitting into equal parts (indices as integer count).
+/// TODO: Support array of indices for splitting at specific positions.
 pub fn split(array: &NDArray, indices: i64) -> Result<RArray, Error> {
     let ruby = Ruby::get().unwrap();
     let data = array.get_data();
@@ -825,6 +840,10 @@ pub fn hsplit(array: &NDArray, indices: i64) -> Result<RArray, Error> {
     Ok(result)
 }
 
+/// Tile an array by repeating it along each axis.
+///
+/// If the number of repetitions is greater than the array's dimensions,
+/// the array is first promoted by prepending new axes of size 1.
 pub fn tile(array: &NDArray, reps: RArray) -> Result<Obj<NDArray>, Error> {
     let reps_vec: Vec<usize> = reps
         .into_iter()
@@ -832,10 +851,33 @@ pub fn tile(array: &NDArray, reps: RArray) -> Result<Obj<NDArray>, Error> {
         .collect::<Result<Vec<_>, _>>()?;
 
     let data = array.get_data();
-    let mut result = data.clone();
+    let mut shape = data.shape().to_vec();
+    let ndim = shape.len();
+    let reps_ndim = reps_vec.len();
 
-    for (axis, &rep) in reps_vec.iter().enumerate() {
-        if axis < result.ndim() && rep > 1 {
+    // If reps has more dimensions than the array, prepend axes of size 1
+    if reps_ndim > ndim {
+        let extra = reps_ndim - ndim;
+        let mut new_shape = vec![1usize; extra];
+        new_shape.extend(shape.iter());
+        shape = new_shape;
+    }
+
+    // Pad reps with 1s at the front if needed
+    let mut full_reps = vec![1usize; shape.len()];
+    let offset = shape.len().saturating_sub(reps_vec.len());
+    for (i, &rep) in reps_vec.iter().enumerate() {
+        full_reps[offset + i] = rep;
+    }
+
+    // Reshape the data to the new shape (with prepended 1s if needed)
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let mut result = ArrayD::from_shape_vec(IxDyn(&shape), flat)
+        .map_err(|e| Error::new(exception::arg_error(), format!("Cannot reshape for tile: {}", e)))?;
+
+    // Now tile along each axis
+    for (axis, &rep) in full_reps.iter().enumerate() {
+        if rep > 1 {
             let views: Vec<_> = (0..rep).map(|_| result.view()).collect();
             result = ndarray::concatenate(Axis(axis), &views)
                 .map_err(|e| Error::new(exception::arg_error(), format!("Cannot tile: {}", e)))?;
@@ -849,9 +891,15 @@ pub fn repeat(array: &NDArray, repeats: i64) -> Result<Obj<NDArray>, Error> {
     repeat_axis(array, repeats, None)
 }
 
-/// Repeat elements along an axis
-/// axis=None: repeat flattened array
-/// axis=i: repeat along axis i
+/// Repeat elements along an axis.
+///
+/// axis=None: repeat flattened array (1D result)
+/// axis=i: repeat along axis i (preserves dimensionality)
+///
+/// # Behavior Difference from NumPy
+/// When axis=None, NumPy returns a flattened 1D array. This implementation
+/// matches that behavior. When axis is specified, elements are repeated
+/// in-place along that axis.
 pub fn repeat_axis(array: &NDArray, repeats: i64, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let repeats = repeats as usize;
@@ -934,11 +982,25 @@ pub fn flipud(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Roll array elements along an axis.
+///
+/// Elements that roll beyond the last position are re-introduced at the first.
 pub fn roll(array: &NDArray, shift: i64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
     let n = flat.len();
+
+    // Early return if shift is 0 or array is empty
+    if shift == 0 || n == 0 {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
+
     let shift = ((shift % n as i64) + n as i64) as usize % n;
+
+    // Early return if effective shift is 0
+    if shift == 0 {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
 
     let mut result = vec![0.0; n];
     for i in 0..n {
@@ -1114,9 +1176,14 @@ pub fn searchsorted(array: &NDArray, value: f64) -> Result<i64, Error> {
     searchsorted_side(array, value, None)
 }
 
-/// Searchsorted with side parameter
+/// Search for insertion point in a sorted array.
+///
 /// side="left" (default): a[i-1] < v <= a[i]
 /// side="right": a[i-1] <= v < a[i]
+///
+/// # Important
+/// The input array MUST be sorted in ascending order. If the array is not sorted,
+/// the results are undefined. Use `RumPy.sort()` first if needed.
 pub fn searchsorted_side(array: &NDArray, value: f64, side: Option<String>) -> Result<i64, Error> {
     let data = array.get_data();
     let flat: Vec<f64> = data.iter().cloned().collect();
@@ -1315,7 +1382,10 @@ pub fn put(array: &NDArray, indices: &NDArray, values: &NDArray) -> Result<Obj<N
     )))
 }
 
-/// Pad array with constant values
+/// Pad array with constant values.
+///
+/// Currently only supports 'constant' padding mode.
+/// TODO: edge, wrap, and reflect modes are not yet implemented.
 pub fn pad(array: &NDArray, pad_width: usize, constant_value: f64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let shape = data.shape().to_vec();
@@ -1366,22 +1436,41 @@ pub fn pad(array: &NDArray, pad_width: usize, constant_value: f64) -> Result<Obj
     )))
 }
 
-/// Expand the shape of an array by inserting a new axis at the specified position
+/// Expand the shape of an array by inserting a new axis at the specified position.
+///
+/// # Arguments
+/// * `axis` - Position where the new axis should be inserted. Can be 0 to ndim
+///            (inclusive). Negative values count from the end: -1 inserts before
+///            the last axis, etc.
+///
+/// # Errors
+/// Returns an error if axis is out of the valid range [-ndim-1, ndim].
 pub fn expand_dims(array: &NDArray, axis: i64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let shape = data.shape();
     let ndim = shape.len();
 
-    // Normalize axis (can be 0 to ndim inclusive for insertion)
-    let axis = if axis < 0 {
-        (ndim as i64 + 1 + axis) as usize
+    // Normalize axis (can be -ndim-1 to ndim inclusive for insertion)
+    // After insertion, the new axis will be at position `axis`
+    let axis_normalized = if axis < 0 {
+        let adjusted = ndim as i64 + 1 + axis;
+        if adjusted < 0 {
+            return Err(Error::new(exception::arg_error(),
+                format!("axis {} is out of bounds for array of dimension {} (valid range: {} to {})",
+                    axis, ndim, -(ndim as i64 + 1), ndim)));
+        }
+        adjusted as usize
     } else {
         axis as usize
     };
 
-    if axis > ndim {
-        return Err(Error::new(exception::arg_error(), format!("axis {} is out of bounds for array of dimension {}", axis, ndim)));
+    if axis_normalized > ndim {
+        return Err(Error::new(exception::arg_error(),
+            format!("axis {} is out of bounds for array of dimension {} (valid range: {} to {})",
+                axis, ndim, -(ndim as i64 + 1), ndim)));
     }
+
+    let axis = axis_normalized;
 
     let mut new_shape = shape.to_vec();
     new_shape.insert(axis, 1);
@@ -1392,19 +1481,39 @@ pub fn expand_dims(array: &NDArray, axis: i64) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Interchange two axes of an array
+/// Interchange two axes of an array.
+///
+/// # Arguments
+/// * `axis1` - First axis. Negative values count from the end.
+/// * `axis2` - Second axis. Negative values count from the end.
+///
+/// # Errors
+/// Returns an error if either axis is out of bounds.
 pub fn swapaxes(array: &NDArray, axis1: i64, axis2: i64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let shape = data.shape();
     let ndim = shape.len();
 
-    // Normalize axes
-    let axis1 = if axis1 < 0 { (ndim as i64 + axis1) as usize } else { axis1 as usize };
-    let axis2 = if axis2 < 0 { (ndim as i64 + axis2) as usize } else { axis2 as usize };
-
-    if axis1 >= ndim || axis2 >= ndim {
-        return Err(Error::new(exception::arg_error(), "axis out of bounds"));
+    if ndim == 0 {
+        return Err(Error::new(exception::arg_error(), "swapaxes requires array with at least 1 dimension"));
     }
+
+    // Normalize axes
+    let axis1_norm = if axis1 < 0 { (ndim as i64 + axis1) as usize } else { axis1 as usize };
+    let axis2_norm = if axis2 < 0 { (ndim as i64 + axis2) as usize } else { axis2 as usize };
+
+    if axis1_norm >= ndim {
+        return Err(Error::new(exception::arg_error(),
+            format!("axis1 {} is out of bounds for array of dimension {}", axis1, ndim)));
+    }
+    if axis2_norm >= ndim {
+        return Err(Error::new(exception::arg_error(),
+            format!("axis2 {} is out of bounds for array of dimension {}", axis2, ndim)));
+    }
+
+    // Reassign to use normalized values
+    let axis1 = axis1_norm;
+    let axis2 = axis2_norm;
 
     if axis1 == axis2 {
         return Ok(Obj::wrap(NDArray::new(data.clone())));
@@ -1455,18 +1564,34 @@ pub fn swapaxes(array: &NDArray, axis1: i64, axis2: i64) -> Result<Obj<NDArray>,
     )))
 }
 
-/// Move axes of an array to new positions
+/// Move axes of an array to new positions.
+///
+/// # Arguments
+/// * `source` - Original position of the axis to move. Negative values count from the end.
+/// * `destination` - Destination position for the axis. Negative values count from the end.
+///
+/// # Errors
+/// Returns an error if source or destination axis is out of bounds.
 pub fn moveaxis(array: &NDArray, source: i64, destination: i64) -> Result<Obj<NDArray>, Error> {
     let data = array.get_data();
     let shape = data.shape();
     let ndim = shape.len();
 
+    if ndim == 0 {
+        return Err(Error::new(exception::arg_error(), "moveaxis requires array with at least 1 dimension"));
+    }
+
     // Normalize axes
     let src = if source < 0 { (ndim as i64 + source) as usize } else { source as usize };
     let dst = if destination < 0 { (ndim as i64 + destination) as usize } else { destination as usize };
 
-    if src >= ndim || dst >= ndim {
-        return Err(Error::new(exception::arg_error(), "axis out of bounds"));
+    if src >= ndim {
+        return Err(Error::new(exception::arg_error(),
+            format!("source axis {} is out of bounds for array of dimension {}", source, ndim)));
+    }
+    if dst >= ndim {
+        return Err(Error::new(exception::arg_error(),
+            format!("destination axis {} is out of bounds for array of dimension {}", destination, ndim)));
     }
 
     if src == dst {

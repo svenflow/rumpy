@@ -1,4 +1,23 @@
-//! Statistical functions
+//! Statistical functions for numerical arrays.
+//!
+//! # NaN Handling
+//!
+//! Different functions handle NaN values differently:
+//!
+//! ## NaN-propagating functions
+//! - `mean`, `std`, `var`: Return NaN if any element is NaN
+//! - `min`, `max`: Return NaN if any element is NaN
+//! - `median`, `percentile`: NaN values sort to the end, may affect result
+//!
+//! ## NaN-ignoring functions (use these for data with missing values)
+//! - `nansum`, `nanmean`, `nanstd`, `nanvar`: Ignore NaN values
+//! - `nanmin`, `nanmax`: Ignore NaN values
+//! - `nanmedian`: Filter out NaN before computing median
+//! - `nanargmin`, `nanargmax`: Return index of min/max among non-NaN values
+//!
+//! ## Special cases
+//! - `quantile`: Filters out NaN values before computing
+//! - `corrcoef`, `cov`: NaN in input may produce NaN in output
 
 use crate::array::NDArray;
 use magnus::{exception, typed_data::Obj, Error, IntoValue, RArray, Value, TryConvert};
@@ -530,10 +549,16 @@ pub fn percentile(arr: &NDArray, q: f64) -> f64 {
     quantile(arr, q / 100.0)
 }
 
+/// Compute the q-th quantile of the array.
+///
+/// # NaN Handling
+/// NaN values are filtered out before computing the quantile. If all values
+/// are NaN, returns NaN. This matches NumPy's nanquantile behavior.
 pub fn quantile(arr: &NDArray, q: f64) -> f64 {
     let data = arr.get_data();
-    let mut sorted: Vec<f64> = data.iter().cloned().collect();
-    sorted.sort_by(nan_safe_cmp);
+    // Filter out NaN values before computing quantile
+    let mut sorted: Vec<f64> = data.iter().cloned().filter(|x| !x.is_nan()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     if sorted.is_empty() {
         return f64::NAN;
@@ -611,6 +636,12 @@ pub fn histogram(arr: &NDArray, bins: usize) -> Result<RArray, Error> {
     Ok(result)
 }
 
+/// Compute correlation coefficient matrix.
+///
+/// # Edge Cases
+/// - For single observation (n_obs=1), correlation is undefined and returns NaN
+/// - For zero variance variables, correlation is undefined and returns NaN/1.0
+/// - Diagonal elements are always 1.0 (self-correlation)
 pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
 
@@ -621,6 +652,18 @@ pub fn corrcoef(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let shape = data.shape();
     let n_vars = shape[0];
     let n_obs = shape[1];
+
+    // Edge case: single observation means correlation is undefined
+    if n_obs < 2 {
+        // Return matrix of NaN except diagonal which is 1.0
+        let mut corr = vec![f64::NAN; n_vars * n_vars];
+        for i in 0..n_vars {
+            corr[i * n_vars + i] = 1.0;
+        }
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[n_vars, n_vars]), corr).unwrap(),
+        )));
+    }
 
     let means: Vec<f64> = (0..n_vars)
         .map(|i| {
@@ -920,8 +963,15 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
         coeffs[i] = coeffs[max_row];
         coeffs[max_row] = tmp;
 
+        // Check pivot tolerance before division to avoid numerical instability
+        let pivot = ata[i * m + i];
+        if pivot.abs() < 1e-14 {
+            return Err(Error::new(exception::runtime_error(),
+                "Polyfit failed: matrix is singular or nearly singular. Data may be collinear."));
+        }
+
         for k in i+1..m {
-            let factor = ata[k * m + i] / ata[i * m + i];
+            let factor = ata[k * m + i] / pivot;
             for j in i..m {
                 ata[k * m + j] -= factor * ata[i * m + j];
             }
@@ -932,6 +982,11 @@ pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Err
     for i in (0..m).rev() {
         for j in i+1..m {
             coeffs[i] -= ata[i * m + j] * coeffs[j];
+        }
+        // Check pivot tolerance before final division
+        if ata[i * m + i].abs() < 1e-14 {
+            return Err(Error::new(exception::runtime_error(),
+                "Polyfit failed: matrix is singular or nearly singular. Data may be collinear."));
         }
         coeffs[i] /= ata[i * m + i];
     }
@@ -963,9 +1018,15 @@ pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
     digitize_right(x, bins, Some(false))
 }
 
-/// Digitize with right parameter
+/// Digitize with right parameter.
+///
+/// Returns bin indices for each value in x. Uses binary search internally
+/// for O(log n) performance per element.
+///
 /// right=False (default): bins[i-1] <= x < bins[i]
 /// right=True: bins[i-1] < x <= bins[i]
+///
+/// Note: This is equivalent to searchsorted with appropriate side parameter.
 pub fn digitize_right(x: &NDArray, bins: &NDArray, right: Option<bool>) -> Result<Obj<NDArray>, Error> {
     let x_data = x.get_data();
     let bins_data = bins.get_data();
@@ -973,6 +1034,7 @@ pub fn digitize_right(x: &NDArray, bins: &NDArray, right: Option<bool>) -> Resul
     let bins_vec: Vec<f64> = bins_data.iter().cloned().collect();
     let right = right.unwrap_or(false);
 
+    // Use binary search (same as searchsorted) for O(log n) performance
     let result: Vec<f64> = x_data.iter().map(|&xi| {
         let mut lo = 0;
         let mut hi = bins_vec.len();

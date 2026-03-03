@@ -322,12 +322,20 @@ gem build rumpy.gemspec
 
 ## Roadmap
 
-- [ ] Broadcasting support
-- [ ] Axis parameters for aggregations
-- [ ] Slicing with ranges
+### Completed
+- [x] Broadcasting support (NumPy-style broadcasting in binary operations)
+- [x] Axis parameters for aggregations (sum, mean, std, var, min, max, etc.)
+- [x] Slicing with ranges (Ruby Range support for array indexing)
+
+### In Progress
+- [ ] Complex number support (required for FFT)
+- [ ] Full FFT implementation (requires complex numbers)
+- [ ] Full eigenvalue/SVD implementation (requires LAPACK bindings)
+
+### Planned
 - [ ] GPU acceleration (via wgpu)
-- [ ] Complex number support
-- [ ] Full FFT implementation
+- [ ] Additional padding modes (edge, wrap, reflect)
+- [ ] Split with array of indices
 
 ## License
 

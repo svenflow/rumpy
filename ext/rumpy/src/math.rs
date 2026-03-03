@@ -129,13 +129,19 @@ pub fn log1p(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x.ln_1p())))
 }
 
+/// Round to nearest integer using banker's rounding (round half to even).
+///
+/// This handles floating-point precision issues by using a tolerance check
+/// rather than exact equality for the 0.5 case.
 pub fn rint(arr: &NDArray) -> Obj<NDArray> {
     // Banker's rounding (round to nearest even)
     let data = arr.get_data();
     Obj::wrap(NDArray::new(data.mapv(|x| {
         let floored = x.floor();
         let frac = x - floored;
-        if frac == 0.5 {
+        // Use tolerance check for floating-point precision
+        // Check if frac is very close to 0.5
+        if (frac - 0.5).abs() < 1e-9 {
             // Round to even
             if floored as i64 % 2 == 0 {
                 floored
@@ -263,9 +269,14 @@ pub fn gradient(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     gradient_axis(arr, None)
 }
 
-/// Gradient with optional axis parameter
+/// Gradient with optional axis parameter.
+///
 /// axis=None: compute gradient on last axis (for n-dim arrays)
 /// axis=i: compute gradient along axis i
+///
+/// # 1-Element Axis Behavior
+/// For axes with only 1 element, NumPy returns an array of zeros since no
+/// gradient can be computed. This implementation follows that behavior.
 pub fn gradient_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
     let shape = data.shape();
@@ -292,6 +303,7 @@ pub fn gradient_axis(arr: &NDArray, axis: Option<i64>) -> Result<Obj<NDArray>, E
     if axis_len == 0 {
         return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(data.raw_dim()))));
     }
+    // For 1-element axes, gradient is undefined but NumPy returns zeros
     if axis_len == 1 {
         return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(data.raw_dim()))));
     }
@@ -494,6 +506,12 @@ pub fn square(arr: &NDArray) -> Obj<NDArray> {
     Obj::wrap(NDArray::new(data.mapv(|x| x * x)))
 }
 
+/// Compute the element-wise reciprocal (1/x) of array values.
+///
+/// # Division by Zero
+/// Note: Division by zero produces infinity (f64::INFINITY for positive zero,
+/// f64::NEG_INFINITY for negative zero), not an error. This matches NumPy behavior.
+/// Use with caution when array may contain zeros.
 pub fn reciprocal(arr: &NDArray) -> Obj<NDArray> {
     let data = arr.get_data();
     Obj::wrap(NDArray::new(data.mapv(|x| 1.0 / x)))
@@ -872,21 +890,94 @@ pub fn logical_xor(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Select elements from x or y based on condition.
+///
+/// Supports NumPy-style broadcasting: condition, x, and y are broadcast together
+/// to a common shape before selection.
 pub fn where_fn(condition: &NDArray, x: &NDArray, y: &NDArray) -> Result<Obj<NDArray>, Error> {
     let cond = condition.get_data();
     let x_data = x.get_data();
     let y_data = y.get_data();
 
-    if cond.shape() != x_data.shape() || cond.shape() != y_data.shape() {
-        return Err(Error::new(exception::arg_error(), "Shape mismatch"));
+    // Simple case: all shapes match
+    if cond.shape() == x_data.shape() && cond.shape() == y_data.shape() {
+        let result = ndarray::Zip::from(&*cond)
+            .and(&*x_data)
+            .and(&*y_data)
+            .map_collect(|&c, &xv, &yv| if c != 0.0 { xv } else { yv });
+        return Ok(Obj::wrap(NDArray::new(result)));
     }
 
-    let result = ndarray::Zip::from(&*cond)
-        .and(&*x_data)
-        .and(&*y_data)
-        .map_collect(|&c, &xv, &yv| if c != 0.0 { xv } else { yv });
+    // Broadcasting case: compute output shape
+    let out_shape = broadcast_shape_3(cond.shape(), x_data.shape(), y_data.shape())?;
+    let out_ndim = out_shape.len();
+    let out_size: usize = out_shape.iter().product();
 
+    let mut result_data = Vec::with_capacity(out_size);
+
+    // Iterate over all output indices
+    let mut out_idx = vec![0usize; out_ndim];
+    for _ in 0..out_size {
+        let cond_idx = broadcast_index_for(&out_idx, cond.shape(), out_ndim);
+        let x_idx = broadcast_index_for(&out_idx, x_data.shape(), out_ndim);
+        let y_idx = broadcast_index_for(&out_idx, y_data.shape(), out_ndim);
+
+        let cond_val = cond[IxDyn(&cond_idx)];
+        let x_val = x_data[IxDyn(&x_idx)];
+        let y_val = y_data[IxDyn(&y_idx)];
+
+        result_data.push(if cond_val != 0.0 { x_val } else { y_val });
+
+        // Increment output index
+        for d in (0..out_ndim).rev() {
+            out_idx[d] += 1;
+            if out_idx[d] < out_shape[d] {
+                break;
+            }
+            out_idx[d] = 0;
+        }
+    }
+
+    let result = ArrayD::from_shape_vec(IxDyn(&out_shape), result_data)
+        .map_err(|e| Error::new(exception::arg_error(), format!("Failed to create result: {}", e)))?;
     Ok(Obj::wrap(NDArray::new(result)))
+}
+
+/// Compute broadcast shape for three input shapes (NumPy broadcasting rules)
+fn broadcast_shape_3(shape1: &[usize], shape2: &[usize], shape3: &[usize]) -> Result<Vec<usize>, Error> {
+    let ndim = shape1.len().max(shape2.len()).max(shape3.len());
+    let mut result = vec![0; ndim];
+
+    for i in 0..ndim {
+        let dim1 = if i < ndim - shape1.len() { 1 } else { shape1[shape1.len() - (ndim - i)] };
+        let dim2 = if i < ndim - shape2.len() { 1 } else { shape2[shape2.len() - (ndim - i)] };
+        let dim3 = if i < ndim - shape3.len() { 1 } else { shape3[shape3.len() - (ndim - i)] };
+
+        // Find the max dimension that's not 1
+        let max_dim = dim1.max(dim2).max(dim3);
+
+        // Check compatibility: each dimension must be 1 or equal to max_dim
+        if (dim1 != 1 && dim1 != max_dim) ||
+           (dim2 != 1 && dim2 != max_dim) ||
+           (dim3 != 1 && dim3 != max_dim) {
+            return Err(Error::new(
+                exception::arg_error(),
+                format!("operands could not be broadcast together with shapes {:?} {:?} {:?}", shape1, shape2, shape3)
+            ));
+        }
+
+        result[i] = max_dim;
+    }
+
+    Ok(result)
+}
+
+/// Get the broadcast index for a given output index (helper for where_fn)
+fn broadcast_index_for(out_idx: &[usize], shape: &[usize], ndim: usize) -> Vec<usize> {
+    let offset = ndim - shape.len();
+    shape.iter().enumerate().map(|(i, &dim)| {
+        if dim == 1 { 0 } else { out_idx[offset + i] }
+    }).collect()
 }
 
 pub fn nonzero(arr: &NDArray) -> Result<magnus::RArray, Error> {
@@ -947,36 +1038,69 @@ pub fn flatnonzero(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
 // FFT - Not implemented (requires complex number support and rustfft crate)
 // These functions now return errors instead of silently returning incorrect results
 
+/// Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
+/// Consider using Ruby's built-in FFT or a dedicated DSP library.
 pub fn fft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "FFT not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "FFT not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// Inverse Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn ifft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "IFFT not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "IFFT not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// 2D Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn fft2(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "FFT2 not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "FFT2 not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// 2D Inverse Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn ifft2(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "IFFT2 not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "IFFT2 not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// N-dimensional Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn fftn(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "FFTN not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "FFTN not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// N-dimensional Inverse Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn ifftn(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "IFFTN not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "IFFTN not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// Real-input Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn rfft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "RFFT not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "RFFT not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
+/// Inverse Real-input Fast Fourier Transform.
+///
+/// Not implemented: requires complex number support and the rustfft crate.
 pub fn irfft(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    Err(Error::new(exception::not_imp_error(), "IRFFT not implemented - requires complex number support"))
+    Err(Error::new(exception::not_imp_error(),
+        "IRFFT not implemented - requires complex number support. Consider using a dedicated FFT library."))
 }
 
 pub fn fftfreq(n: usize, d: f64) -> Result<Obj<NDArray>, Error> {

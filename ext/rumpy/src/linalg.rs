@@ -76,8 +76,8 @@ pub fn inv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Moore-Penrose pseudo-inverse using regularized least squares
-/// Handles rank-deficient matrices by using Tikhonov regularization
+/// Moore-Penrose pseudo-inverse using regularized least squares.
+/// Handles rank-deficient matrices by using Tikhonov regularization.
 pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
 
@@ -104,8 +104,10 @@ pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     }
 
     // Rank-deficient case: use Tikhonov regularization (ridge regression)
-    // A+ ≈ (A^T A + λI)^-1 A^T where λ is a small regularization parameter
-    let lambda = 1e-10;
+    // A+ = (A^T A + lambda*I)^-1 A^T where lambda is a regularization parameter
+    // Use machine epsilon scaled by matrix dimension for numerical stability
+    let max_dim = m.max(n) as f64;
+    let lambda = f64::EPSILON * max_dim * max_dim;
 
     // Add λI to A^T A
     let mut ata_reg_data = ata.get_data().to_owned();
@@ -412,36 +414,47 @@ pub fn cond(arr: &NDArray) -> Result<f64, Error> {
     }
 }
 
-/// Eigenvalues and eigenvectors
-/// Note: Full implementation requires QR algorithm or external LAPACK
+/// Eigenvalues and eigenvectors.
+///
+/// Not implemented: requires QR algorithm or LAPACK bindings.
+/// For eigenvalue computation, consider using the nalgebra crate or
+/// linking against LAPACK/OpenBLAS.
 pub fn eig(_arr: &NDArray) -> Result<RArray, Error> {
     Err(Error::new(exception::not_imp_error(),
-        "eig not fully implemented - requires LAPACK or similar library for accurate eigendecomposition"))
+        "eig not implemented - requires LAPACK or iterative QR algorithm. Consider using nalgebra crate."))
 }
 
-/// Eigenvalues only
+/// Eigenvalues only.
+///
+/// Not implemented: requires QR algorithm or LAPACK bindings.
 pub fn eigvals(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     Err(Error::new(exception::not_imp_error(),
-        "eigvals not fully implemented - requires LAPACK or similar library"))
+        "eigvals not implemented - requires LAPACK or iterative QR algorithm. Consider using nalgebra crate."))
 }
 
-/// Eigenvalues/vectors for symmetric matrix
+/// Eigenvalues and eigenvectors for symmetric/Hermitian matrix.
+///
+/// Not implemented: requires LAPACK bindings for efficient computation.
 pub fn eigh(_arr: &NDArray) -> Result<RArray, Error> {
     Err(Error::new(exception::not_imp_error(),
-        "eigh not fully implemented - requires LAPACK or similar library"))
+        "eigh not implemented - requires LAPACK or iterative algorithm. Consider using nalgebra crate."))
 }
 
-/// Eigenvalues for symmetric matrix
+/// Eigenvalues for symmetric/Hermitian matrix.
+///
+/// Not implemented: requires LAPACK bindings for efficient computation.
 pub fn eigvalsh(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     Err(Error::new(exception::not_imp_error(),
-        "eigvalsh not fully implemented - requires LAPACK or similar library"))
+        "eigvalsh not implemented - requires LAPACK or iterative algorithm. Consider using nalgebra crate."))
 }
 
-/// Singular Value Decomposition
-/// Note: Full implementation requires iterative algorithms or LAPACK
+/// Singular Value Decomposition.
+///
+/// Not implemented: requires iterative algorithms (Golub-Kahan) or LAPACK.
+/// For SVD computation, consider using the nalgebra crate or linking against LAPACK.
 pub fn svd(_arr: &NDArray) -> Result<RArray, Error> {
     Err(Error::new(exception::not_imp_error(),
-        "svd not fully implemented - requires LAPACK or similar library for accurate SVD"))
+        "svd not implemented - requires LAPACK or iterative Golub-Kahan algorithm. Consider using nalgebra crate."))
 }
 
 /// QR decomposition using Modified Gram-Schmidt (numerically stable)

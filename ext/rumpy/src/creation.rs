@@ -48,33 +48,37 @@ pub fn empty(shape: RArray) -> Result<Obj<NDArray>, Error> {
     zeros(shape)
 }
 
-/// Create an array with evenly spaced values within a given interval
+/// Create an array with evenly spaced values within a given interval.
+///
+/// Uses index-based calculation to avoid floating-point accumulation errors.
 pub fn arange(start: f64, stop: f64, step: f64) -> Result<Obj<NDArray>, Error> {
     if step == 0.0 {
         return Err(Error::new(exception::arg_error(), "Step cannot be zero"));
     }
 
-    let mut values = Vec::new();
-    let mut current = start;
-
-    if step > 0.0 {
-        while current < stop {
-            values.push(current);
-            current += step;
-        }
+    // Calculate number of elements to avoid accumulation error
+    let n = if step > 0.0 {
+        ((stop - start) / step).ceil() as usize
     } else {
-        while current > stop {
-            values.push(current);
-            current += step;
-        }
-    }
+        ((start - stop) / (-step)).ceil() as usize
+    };
+
+    // Use index-based calculation: value[i] = start + i * step
+    // This avoids accumulation error from repeated addition
+    let values: Vec<f64> = (0..n)
+        .map(|i| start + (i as f64) * step)
+        .take_while(|&v| if step > 0.0 { v < stop } else { v > stop })
+        .collect();
 
     let arr = ArrayD::from_shape_vec(IxDyn(&[values.len()]), values)
         .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
     Ok(Obj::wrap(NDArray::new(arr)))
 }
 
-/// Create evenly spaced numbers over a specified interval
+/// Create evenly spaced numbers over a specified interval.
+///
+/// The last element is guaranteed to be exactly equal to `stop` to avoid
+/// floating-point accumulation errors.
 pub fn linspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error> {
     if num == 0 {
         return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
@@ -86,7 +90,12 @@ pub fn linspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error
     }
 
     let step = (stop - start) / (num - 1) as f64;
-    let values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
+    let mut values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
+
+    // Ensure the last element is exactly equal to stop (avoid accumulation error)
+    if let Some(last) = values.last_mut() {
+        *last = stop;
+    }
 
     let arr = ArrayD::from_shape_vec(IxDyn(&[num]), values)
         .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
