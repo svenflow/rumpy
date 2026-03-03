@@ -29,6 +29,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("linspace", function!(creation::linspace, 3))?;
     rumpy.define_singleton_method("logspace", function!(creation::logspace, 3))?;
     rumpy.define_singleton_method("geomspace", function!(creation::geomspace, 3))?;
+    rumpy.define_singleton_method("meshgrid", function!(creation::meshgrid, 2))?;
     rumpy.define_singleton_method("eye", function!(creation::eye, 1))?;
     rumpy.define_singleton_method("identity", function!(creation::identity, 1))?;
     rumpy.define_singleton_method("diag", function!(creation::diag, 1))?;
@@ -138,6 +139,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("histogram", function!(stats::histogram, 2))?;
     rumpy.define_singleton_method("corrcoef", function!(stats::corrcoef, 1))?;
     rumpy.define_singleton_method("cov", function!(stats::cov, 1))?;
+    rumpy.define_singleton_method("trapz", function!(stats::trapz, 2))?;
+    rumpy.define_singleton_method("polyfit", function!(stats::polyfit, 3))?;
+    rumpy.define_singleton_method("polyval", function!(stats::polyval, 2))?;
+    rumpy.define_singleton_method("digitize", function!(stats::digitize, 2))?;
 
     // NDArray aggregation methods
     ndarray_class.define_method("sum", method!(array::NDArray::sum, 0))?;
@@ -223,6 +228,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     rumpy.define_singleton_method("argsort", function!(array::argsort, 1))?;
     rumpy.define_singleton_method("searchsorted", function!(array::searchsorted, 2))?;
     rumpy.define_singleton_method("unique", function!(array::unique, 1))?;
+    rumpy.define_singleton_method("squeeze", function!(array::squeeze, 1))?;
+    rumpy.define_singleton_method("take", function!(array::take, 2))?;
+    rumpy.define_singleton_method("put", function!(array::put, 3))?;
+    rumpy.define_singleton_method("pad", function!(array::pad, 3))?;
 
     // FFT submodule
     let fft_mod = rumpy.define_module("FFT")?;

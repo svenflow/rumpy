@@ -657,3 +657,102 @@ pub fn unique(array: &NDArray) -> Result<Obj<NDArray>, Error> {
     flat.dedup();
     Ok(Obj::wrap(NDArray::new(ArrayD::from_shape_vec(IxDyn(&[flat.len()]), flat).unwrap())))
 }
+
+/// Squeeze: remove axes of length 1
+pub fn squeeze(array: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let new_shape: Vec<usize> = data.shape().iter().filter(|&&s| s != 1).cloned().collect();
+
+    if new_shape.is_empty() {
+        // Scalar case
+        let val = data.iter().next().cloned().unwrap_or(0.0);
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[]), vec![val]).unwrap()
+        )));
+    }
+
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&new_shape), flat).unwrap()
+    )))
+}
+
+/// Take elements from array along an axis
+pub fn take(array: &NDArray, indices: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let idx_data = indices.get_data();
+
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let result: Vec<f64> = idx_data.iter().map(|&i| {
+        let idx = i as usize;
+        if idx < flat.len() {
+            flat[idx]
+        } else {
+            f64::NAN
+        }
+    }).collect();
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(idx_data.raw_dim(), result).unwrap()
+    )))
+}
+
+/// Put values into array at specified indices
+pub fn put(array: &NDArray, indices: &NDArray, values: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let idx_data = indices.get_data();
+    let val_data = values.get_data();
+
+    let mut flat: Vec<f64> = data.iter().cloned().collect();
+    let vals: Vec<f64> = val_data.iter().cloned().collect();
+
+    for (i, &idx) in idx_data.iter().enumerate() {
+        let idx = idx as usize;
+        if idx < flat.len() {
+            flat[idx] = vals[i % vals.len()];
+        }
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(data.raw_dim(), flat).unwrap()
+    )))
+}
+
+/// Pad array with constant values
+pub fn pad(array: &NDArray, pad_width: usize, constant_value: f64) -> Result<Obj<NDArray>, Error> {
+    let data = array.get_data();
+    let shape = data.shape();
+
+    // Simple case: 1D padding
+    if data.ndim() == 1 {
+        let n = shape[0];
+        let new_len = n + 2 * pad_width;
+        let mut result = vec![constant_value; new_len];
+        for (i, &val) in data.iter().enumerate() {
+            result[pad_width + i] = val;
+        }
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[new_len]), result).unwrap()
+        )));
+    }
+
+    // 2D padding
+    if data.ndim() == 2 {
+        let (h, w) = (shape[0], shape[1]);
+        let new_h = h + 2 * pad_width;
+        let new_w = w + 2 * pad_width;
+        let mut result = vec![constant_value; new_h * new_w];
+
+        for i in 0..h {
+            for j in 0..w {
+                result[(pad_width + i) * new_w + (pad_width + j)] = data[[i, j]];
+            }
+        }
+
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[new_h, new_w]), result).unwrap()
+        )));
+    }
+
+    Err(Error::new(exception::arg_error(), "pad only supports 1D and 2D arrays"))
+}

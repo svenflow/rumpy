@@ -211,6 +211,39 @@ pub fn ones_like(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
+/// Create coordinate matrices from coordinate vectors (meshgrid)
+pub fn meshgrid(x: &NDArray, y: &NDArray) -> Result<RArray, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    let nx = x_data.len();
+    let ny = y_data.len();
+
+    // xx: each row is a copy of x
+    let mut xx = Vec::with_capacity(ny * nx);
+    for _ in 0..ny {
+        for &xv in x_data.iter() {
+            xx.push(xv);
+        }
+    }
+
+    // yy: each column is a copy of y
+    let mut yy = Vec::with_capacity(ny * nx);
+    for &yv in y_data.iter() {
+        for _ in 0..nx {
+            yy.push(yv);
+        }
+    }
+
+    let xx_arr = NDArray::new(ArrayD::from_shape_vec(IxDyn(&[ny, nx]), xx).unwrap());
+    let yy_arr = NDArray::new(ArrayD::from_shape_vec(IxDyn(&[ny, nx]), yy).unwrap());
+
+    let result = RArray::new();
+    result.push(Obj::wrap(xx_arr))?;
+    result.push(Obj::wrap(yy_arr))?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

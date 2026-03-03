@@ -266,6 +266,158 @@ pub fn cov(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
+/// Trapezoidal integration
+pub fn trapz(y: &NDArray, dx: f64) -> f64 {
+    let data = y.get_data();
+    let flat: Vec<f64> = data.iter().cloned().collect();
+    let n = flat.len();
+
+    if n < 2 {
+        return 0.0;
+    }
+
+    let mut sum = 0.0;
+    for i in 0..n-1 {
+        sum += (flat[i] + flat[i+1]) / 2.0 * dx;
+    }
+    sum
+}
+
+/// Polynomial fitting (simple least squares)
+pub fn polyfit(x: &NDArray, y: &NDArray, deg: usize) -> Result<Obj<NDArray>, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    if x_data.len() != y_data.len() {
+        return Err(Error::new(exception::arg_error(), "x and y must have the same length"));
+    }
+
+    let n = x_data.len();
+    let m = deg + 1;
+
+    if n < m {
+        return Err(Error::new(exception::arg_error(), "Not enough data points for polynomial degree"));
+    }
+
+    // Build Vandermonde matrix
+    let mut vandermonde = vec![0.0; n * m];
+    for i in 0..n {
+        let xi = x_data.iter().nth(i).cloned().unwrap();
+        for j in 0..m {
+            vandermonde[i * m + j] = xi.powi((m - 1 - j) as i32);
+        }
+    }
+
+    // Solve using normal equations: (V^T V) c = V^T y
+    // This is simplified - a proper implementation would use QR decomposition
+    let mut ata = vec![0.0; m * m];
+    let mut atb = vec![0.0; m];
+
+    for i in 0..m {
+        for j in 0..m {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += vandermonde[k * m + i] * vandermonde[k * m + j];
+            }
+            ata[i * m + j] = sum;
+        }
+        let mut sum = 0.0;
+        for k in 0..n {
+            sum += vandermonde[k * m + i] * y_data.iter().nth(k).cloned().unwrap();
+        }
+        atb[i] = sum;
+    }
+
+    // Simple Gaussian elimination (for small polynomials)
+    let mut coeffs = atb.clone();
+    for i in 0..m {
+        // Find pivot
+        let mut max_row = i;
+        for k in i+1..m {
+            if ata[k * m + i].abs() > ata[max_row * m + i].abs() {
+                max_row = k;
+            }
+        }
+        // Swap rows
+        for j in 0..m {
+            let tmp = ata[i * m + j];
+            ata[i * m + j] = ata[max_row * m + j];
+            ata[max_row * m + j] = tmp;
+        }
+        let tmp = coeffs[i];
+        coeffs[i] = coeffs[max_row];
+        coeffs[max_row] = tmp;
+
+        // Eliminate
+        for k in i+1..m {
+            let factor = ata[k * m + i] / ata[i * m + i];
+            for j in i..m {
+                ata[k * m + j] -= factor * ata[i * m + j];
+            }
+            coeffs[k] -= factor * coeffs[i];
+        }
+    }
+
+    // Back substitution
+    for i in (0..m).rev() {
+        for j in i+1..m {
+            coeffs[i] -= ata[i * m + j] * coeffs[j];
+        }
+        coeffs[i] /= ata[i * m + i];
+    }
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[m]), coeffs).unwrap(),
+    )))
+}
+
+/// Polynomial evaluation
+pub fn polyval(p: &NDArray, x: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let p_data = p.get_data();
+    let x_data = x.get_data();
+
+    let coeffs: Vec<f64> = p_data.iter().cloned().collect();
+    let result: Vec<f64> = x_data.iter().map(|&xi| {
+        // Horner's method
+        let mut val = 0.0;
+        for &c in coeffs.iter() {
+            val = val * xi + c;
+        }
+        val
+    }).collect();
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(x_data.raw_dim(), result).unwrap(),
+    )))
+}
+
+/// Digitize - return indices of bins to which each value belongs
+pub fn digitize(x: &NDArray, bins: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let x_data = x.get_data();
+    let bins_data = bins.get_data();
+
+    let bins_vec: Vec<f64> = bins_data.iter().cloned().collect();
+
+    let result: Vec<f64> = x_data.iter().map(|&xi| {
+        // Binary search for bin
+        let mut lo = 0;
+        let mut hi = bins_vec.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if xi >= bins_vec[mid] {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo as f64
+    }).collect();
+
+    Ok(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(x_data.raw_dim(), result).unwrap(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
