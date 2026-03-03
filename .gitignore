@@ -1,0 +1,16 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Ruby build artifacts
+lib/rumpy/*.bundle
+lib/rumpy/*.so
+lib/rumpy/*.dylib
+tmp/
+
+# Gemfile lock (for development)
+Gemfile.lock
+
+# Test/benchmark artifacts
+benchmark_*.rb
+*.log

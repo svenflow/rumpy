@@ -76,7 +76,8 @@ pub fn inv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// Moore-Penrose pseudo-inverse (simplified - uses normal equations)
+/// Moore-Penrose pseudo-inverse using regularized least squares.
+/// Handles rank-deficient matrices by using Tikhonov regularization.
 pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
 
@@ -84,12 +85,55 @@ pub fn pinv(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
         return Err(Error::new(exception::arg_error(), "pinv requires 2D array"));
     }
 
-    // A+ = (A^T A)^-1 A^T for overdetermined systems
-    // This is a simplified implementation
+    let shape = data.shape();
+    let m = shape[0];
+    let n = shape[1];
+
     let at = Obj::wrap(NDArray::new(data.t().to_owned()));
+
+    // Try the normal equations first: A+ = (A^T A)^-1 A^T
     let ata = matmul(&at, arr)?;
-    let ata_inv = inv(&ata)?;
-    matmul(&ata_inv, &at)
+
+    // Check if A^T A is well-conditioned by checking its determinant
+    let d = det(&ata)?;
+
+    if d.abs() > 1e-10 {
+        // Matrix is well-conditioned, use normal equations
+        let ata_inv = inv(&ata)?;
+        return matmul(&ata_inv, &at);
+    }
+
+    // Rank-deficient case: use Tikhonov regularization (ridge regression)
+    // A+ = (A^T A + lambda*I)^-1 A^T where lambda is a regularization parameter
+    // Use machine epsilon scaled by matrix dimension for numerical stability
+    let max_dim = m.max(n) as f64;
+    let lambda = f64::EPSILON * max_dim * max_dim;
+
+    // Add λI to A^T A
+    let mut ata_reg_data = ata.get_data().to_owned();
+    let ata_shape = ata_reg_data.shape();
+    let nn = ata_shape[0];
+    for i in 0..nn {
+        ata_reg_data[[i, i]] += lambda;
+    }
+
+    let ata_reg = Obj::wrap(NDArray::new(ata_reg_data));
+
+    match inv(&ata_reg) {
+        Ok(ata_reg_inv) => matmul(&ata_reg_inv, &at),
+        Err(_) => {
+            // If still fails, use A^T (A A^T + λI)^-1 for m < n case
+            let aat = matmul(arr, &at)?;
+            let mut aat_reg_data = aat.get_data().to_owned();
+            let mm = aat_reg_data.shape()[0];
+            for i in 0..mm {
+                aat_reg_data[[i, i]] += lambda;
+            }
+            let aat_reg = Obj::wrap(NDArray::new(aat_reg_data));
+            let aat_reg_inv = inv(&aat_reg)?;
+            matmul(&at, &aat_reg_inv)
+        }
+    }
 }
 
 /// Matrix determinant using LU decomposition
@@ -196,9 +240,9 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
             break;
         }
 
-        // Find pivot
+        // Find pivot using consistent tolerance (1e-14) across linalg functions
         let mut pivot_row = row;
-        while pivot_row < m && a[pivot_row][col].abs() < 1e-10 {
+        while pivot_row < m && a[pivot_row][col].abs() < 1e-14 {
             pivot_row += 1;
         }
 
@@ -211,7 +255,7 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
 
         // Eliminate below
         for i in (row + 1)..m {
-            if a[row][col].abs() > 1e-10 {
+            if a[row][col].abs() > 1e-14 {
                 let factor = a[i][col] / a[row][col];
                 for j in col..n {
                     a[i][j] -= factor * a[row][j];
@@ -226,15 +270,117 @@ pub fn rank(arr: &NDArray) -> Result<i64, Error> {
     Ok(rank)
 }
 
-/// Frobenius norm
+/// Frobenius norm (default)
 pub fn norm(arr: &NDArray) -> Result<f64, Error> {
+    norm_ord(arr, None)
+}
+
+/// Matrix/vector norm with ord parameter
+/// ord=None or ord=2: Frobenius norm for matrices, 2-norm for vectors
+/// ord=1: max column sum for matrices, 1-norm for vectors
+/// ord=-1: min column sum for matrices
+/// ord="inf": max row sum for matrices, infinity norm for vectors
+/// ord=-"inf": min row sum for matrices
+pub fn norm_ord(arr: &NDArray, ord: Option<f64>) -> Result<f64, Error> {
     let data = arr.get_data();
+
+    // Handle 1D (vector norm)
+    if data.ndim() == 1 {
+        let flat: Vec<f64> = data.iter().cloned().collect();
+        return match ord {
+            None | Some(2.0) => {
+                let sum_sq: f64 = flat.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(1.0) => {
+                Ok(flat.iter().map(|&x| x.abs()).sum())
+            }
+            Some(p) if p == f64::INFINITY => {
+                Ok(flat.iter().map(|&x| x.abs()).fold(0.0, f64::max))
+            }
+            Some(p) if p == f64::NEG_INFINITY => {
+                Ok(flat.iter().map(|&x| x.abs()).fold(f64::INFINITY, f64::min))
+            }
+            Some(0.0) => {
+                // 0-norm = count of nonzero elements
+                Ok(flat.iter().filter(|&&x| x != 0.0).count() as f64)
+            }
+            Some(p) => {
+                // p-norm
+                let sum: f64 = flat.iter().map(|&x| x.abs().powf(p)).sum();
+                Ok(sum.powf(1.0 / p))
+            }
+        };
+    }
+
+    // Handle 2D (matrix norm)
+    if data.ndim() == 2 {
+        let shape = data.shape();
+        let m = shape[0];
+        let n = shape[1];
+
+        return match ord {
+            None => {
+                // Frobenius norm
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(2.0) => {
+                // Frobenius norm
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+            Some(1.0) => {
+                // Max absolute column sum
+                let mut max_sum: f64 = 0.0;
+                for j in 0..n {
+                    let col_sum: f64 = (0..m).map(|i| data[[i, j]].abs()).sum();
+                    max_sum = max_sum.max(col_sum);
+                }
+                Ok(max_sum)
+            }
+            Some(p) if p == f64::INFINITY => {
+                // Max absolute row sum
+                let mut max_sum: f64 = 0.0;
+                for i in 0..m {
+                    let row_sum: f64 = (0..n).map(|j| data[[i, j]].abs()).sum();
+                    max_sum = max_sum.max(row_sum);
+                }
+                Ok(max_sum)
+            }
+            Some(p) if p == f64::NEG_INFINITY => {
+                // Min absolute row sum
+                let mut min_sum: f64 = f64::INFINITY;
+                for i in 0..m {
+                    let row_sum: f64 = (0..n).map(|j| data[[i, j]].abs()).sum();
+                    min_sum = min_sum.min(row_sum);
+                }
+                Ok(min_sum)
+            }
+            Some(-1.0) => {
+                // Min absolute column sum
+                let mut min_sum: f64 = f64::INFINITY;
+                for j in 0..n {
+                    let col_sum: f64 = (0..m).map(|i| data[[i, j]].abs()).sum();
+                    min_sum = min_sum.min(col_sum);
+                }
+                Ok(min_sum)
+            }
+            _ => {
+                // Default to Frobenius
+                let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
+                Ok(sum_sq.sqrt())
+            }
+        };
+    }
+
+    // General case: Frobenius norm
     let sum_sq: f64 = data.iter().map(|&x| x * x).sum();
     Ok(sum_sq.sqrt())
 }
 
 /// Condition number (ratio of largest to smallest singular value)
-/// Simplified implementation
+/// Uses norm(A) * norm(A^-1) with fallback for singular matrices
 pub fn cond(arr: &NDArray) -> Result<f64, Error> {
     let data = arr.get_data();
 
@@ -242,108 +388,76 @@ pub fn cond(arr: &NDArray) -> Result<f64, Error> {
         return Err(Error::new(exception::arg_error(), "cond requires 2D array"));
     }
 
-    // Simplified: use norm(A) * norm(A^-1)
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "cond requires square matrix"));
+    }
+
+    // Check if matrix is singular
+    let d = det(arr)?;
+    if d.abs() < 1e-14 {
+        // Singular matrix has infinite condition number
+        return Ok(f64::INFINITY);
+    }
+
+    // Use norm(A) * norm(A^-1)
     let norm_a = norm(arr)?;
-    let inv_a = inv(arr)?;
-    let norm_inv = norm(&inv_a)?;
-
-    Ok(norm_a * norm_inv)
-}
-
-/// Eigenvalues and eigenvectors (power iteration - simplified)
-pub fn eig(arr: &NDArray) -> Result<RArray, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "eig requires 2D array"));
+    match inv(arr) {
+        Ok(inv_a) => {
+            let norm_inv = norm(&inv_a)?;
+            Ok(norm_a * norm_inv)
+        }
+        Err(_) => {
+            // Inverse failed, matrix is effectively singular
+            Ok(f64::INFINITY)
+        }
     }
-
-    let shape = data.shape();
-    if shape[0] != shape[1] {
-        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
-    }
-
-    // For now, return placeholder
-    // Real implementation would use QR algorithm
-    let n = shape[0];
-    let eigenvalues = vec![0.0; n];
-    let eigenvectors = vec![0.0; n * n];
-
-    let result = RArray::new();
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n]), eigenvalues).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), eigenvectors).unwrap(),
-    )))?;
-
-    Ok(result)
 }
 
-/// Eigenvalues only
-pub fn eigvals(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "eigvals requires 2D array"));
-    }
-
-    let shape = data.shape();
-    if shape[0] != shape[1] {
-        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
-    }
-
-    let n = shape[0];
-    let eigenvalues = vec![0.0; n];  // Placeholder
-
-    Ok(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n]), eigenvalues).unwrap(),
-    )))
+/// Eigenvalues and eigenvectors.
+///
+/// Not implemented: requires QR algorithm or LAPACK bindings.
+/// For eigenvalue computation, consider using the nalgebra crate or
+/// linking against LAPACK/OpenBLAS.
+pub fn eig(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eig not implemented - requires LAPACK or iterative QR algorithm. Consider using nalgebra crate."))
 }
 
-/// Eigenvalues/vectors for symmetric matrix
-pub fn eigh(arr: &NDArray) -> Result<RArray, Error> {
-    eig(arr)
+/// Eigenvalues only.
+///
+/// Not implemented: requires QR algorithm or LAPACK bindings.
+pub fn eigvals(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigvals not implemented - requires LAPACK or iterative QR algorithm. Consider using nalgebra crate."))
 }
 
-/// Eigenvalues for symmetric matrix
-pub fn eigvalsh(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
-    eigvals(arr)
+/// Eigenvalues and eigenvectors for symmetric/Hermitian matrix.
+///
+/// Not implemented: requires LAPACK bindings for efficient computation.
+pub fn eigh(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigh not implemented - requires LAPACK or iterative algorithm. Consider using nalgebra crate."))
 }
 
-/// Singular Value Decomposition (simplified)
-pub fn svd(arr: &NDArray) -> Result<RArray, Error> {
-    let data = arr.get_data();
-
-    if data.ndim() != 2 {
-        return Err(Error::new(exception::arg_error(), "svd requires 2D array"));
-    }
-
-    let shape = data.shape();
-    let m = shape[0];
-    let n = shape[1];
-    let k = m.min(n);
-
-    // Placeholder implementation
-    let u = vec![0.0; m * m];
-    let s = vec![0.0; k];
-    let vt = vec![0.0; n * n];
-
-    let result = RArray::new();
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[m, m]), u).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[k]), s).unwrap(),
-    )))?;
-    result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), vt).unwrap(),
-    )))?;
-
-    Ok(result)
+/// Eigenvalues for symmetric/Hermitian matrix.
+///
+/// Not implemented: requires LAPACK bindings for efficient computation.
+pub fn eigvalsh(_arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "eigvalsh not implemented - requires LAPACK or iterative algorithm. Consider using nalgebra crate."))
 }
 
-/// QR decomposition
+/// Singular Value Decomposition.
+///
+/// Not implemented: requires iterative algorithms (Golub-Kahan) or LAPACK.
+/// For SVD computation, consider using the nalgebra crate or linking against LAPACK.
+pub fn svd(_arr: &NDArray) -> Result<RArray, Error> {
+    Err(Error::new(exception::not_imp_error(),
+        "svd not implemented - requires LAPACK or iterative Golub-Kahan algorithm. Consider using nalgebra crate."))
+}
+
+/// QR decomposition using Modified Gram-Schmidt (numerically stable)
 pub fn qr(arr: &NDArray) -> Result<RArray, Error> {
     let data = arr.get_data();
 
@@ -354,49 +468,64 @@ pub fn qr(arr: &NDArray) -> Result<RArray, Error> {
     let shape = data.shape();
     let m = shape[0];
     let n = shape[1];
+    let k = m.min(n); // Number of columns in Q
 
-    // Gram-Schmidt orthogonalization
-    let mut q_cols: Vec<Vec<f64>> = Vec::new();
-    let mut r = vec![0.0; n * n];
+    // Modified Gram-Schmidt - more numerically stable than classical GS
+    // We work with columns directly and orthogonalize against previous columns
+    let mut q_cols: Vec<Vec<f64>> = (0..n)
+        .map(|j| (0..m).map(|i| data[[i, j]]).collect())
+        .collect();
 
-    for j in 0..n {
-        // Get column j
-        let mut v: Vec<f64> = (0..m).map(|i| data[[i, j]]).collect();
+    let mut r = vec![0.0; k * n];
 
-        // Subtract projections
-        for (k, q_col) in q_cols.iter().enumerate() {
-            let proj: f64 = v.iter().zip(q_col.iter()).map(|(&a, &b)| a * b).sum();
-            r[k * n + j] = proj;
-            for i in 0..m {
-                v[i] -= proj * q_col[i];
+    for j in 0..k {
+        // Compute norm of column j
+        let norm_j: f64 = q_cols[j].iter().map(|&x| x * x).sum::<f64>().sqrt();
+
+        if norm_j > 1e-14 {
+            r[j * n + j] = norm_j;
+            // Normalize column j
+            for x in &mut q_cols[j] {
+                *x /= norm_j;
             }
-        }
-
-        // Normalize
-        let norm: f64 = v.iter().map(|&x| x * x).sum::<f64>().sqrt();
-        if norm > 1e-10 {
-            r[j * n + j] = norm;
-            for x in &mut v {
-                *x /= norm;
-            }
-            q_cols.push(v);
         } else {
             r[j * n + j] = 0.0;
-            q_cols.push(vec![0.0; m]);
+            // Column is zero, leave as is
+            continue;
+        }
+
+        // Modified GS: orthogonalize remaining columns against column j
+        for i in (j + 1)..n {
+            // Compute projection of column i onto column j
+            let proj: f64 = q_cols[i].iter()
+                .zip(q_cols[j].iter())
+                .map(|(&a, &b)| a * b)
+                .sum();
+
+            r[j * n + i] = proj;
+
+            // Subtract projection
+            for row in 0..m {
+                q_cols[i][row] -= proj * q_cols[j][row];
+            }
         }
     }
 
-    // Build Q matrix
-    let q: Vec<f64> = (0..m)
-        .flat_map(|i| q_cols.iter().map(move |col| col.get(i).cloned().unwrap_or(0.0)))
-        .collect();
+    // Build Q matrix (m x k)
+    let mut q = vec![0.0; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            q[i * k + j] = q_cols[j][i];
+        }
+    }
 
+    // Build R matrix (k x n)
     let result = RArray::new();
     result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[m, n.min(m)]), q).unwrap(),
+        ArrayD::from_shape_vec(IxDyn(&[m, k]), q).unwrap(),
     )))?;
     result.push(Obj::wrap(NDArray::new(
-        ArrayD::from_shape_vec(IxDyn(&[n, n]), r).unwrap(),
+        ArrayD::from_shape_vec(IxDyn(&[k, n]), r).unwrap(),
     )))?;
 
     Ok(result)
@@ -453,7 +582,16 @@ pub fn cholesky(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     )))
 }
 
-/// LU decomposition
+/// LU decomposition with partial pivoting.
+///
+/// Returns (P, L, U) where PA = LU:
+/// - P is the permutation matrix (n x n)
+/// - L is lower triangular with ones on diagonal (n x n)
+/// - U is upper triangular (n x m)
+///
+/// # P Matrix Construction
+/// The permutation matrix P is constructed such that P[i, perm[i]] = 1,
+/// where perm tracks the row swaps during elimination. This satisfies PA = LU.
 pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
     let data = arr.get_data();
 
@@ -465,18 +603,46 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
     let n = shape[0];
     let m = shape[1];
 
+    // Initialize P as identity, L as zeros (will fill lower triangular), U as copy of A
+    let mut p = vec![0.0; n * n];
+    for i in 0..n {
+        p[i * n + i] = 1.0;
+    }
     let mut l = vec![0.0; n * n];
     let mut u: Vec<Vec<f64>> = (0..n)
         .map(|i| (0..m).map(|j| data[[i, j]]).collect())
         .collect();
 
-    // Initialize L diagonal
-    for i in 0..n {
-        l[i * n + i] = 1.0;
-    }
+    // Track row permutations
+    let mut perm: Vec<usize> = (0..n).collect();
 
     for col in 0..n.min(m) {
-        if u[col][col].abs() < 1e-10 {
+        // Find pivot (largest absolute value in column)
+        let mut max_row = col;
+        let mut max_val = u[col][col].abs();
+        for row in (col + 1)..n {
+            if u[row][col].abs() > max_val {
+                max_row = row;
+                max_val = u[row][col].abs();
+            }
+        }
+
+        // Swap rows in U and track in perm
+        if max_row != col {
+            u.swap(col, max_row);
+            perm.swap(col, max_row);
+            // Also swap L rows (for columns already processed)
+            for j in 0..col {
+                let tmp = l[col * n + j];
+                l[col * n + j] = l[max_row * n + j];
+                l[max_row * n + j] = tmp;
+            }
+        }
+
+        // Set L diagonal
+        l[col * n + col] = 1.0;
+
+        if u[col][col].abs() < 1e-15 {
             continue;
         }
 
@@ -489,9 +655,19 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
         }
     }
 
+    // Build P matrix from permutation
+    let mut p_matrix = vec![0.0; n * n];
+    for i in 0..n {
+        p_matrix[i * n + perm[i]] = 1.0;
+    }
+
     let u_flat: Vec<f64> = u.into_iter().flatten().collect();
 
     let result = RArray::new();
+    // Return (P, L, U)
+    result.push(Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[n, n]), p_matrix).unwrap(),
+    )))?;
     result.push(Obj::wrap(NDArray::new(
         ArrayD::from_shape_vec(IxDyn(&[n, n]), l).unwrap(),
     )))?;
@@ -503,19 +679,134 @@ pub fn lu(arr: &NDArray) -> Result<RArray, Error> {
 }
 
 /// Solve linear system Ax = b
+/// Checks for singular matrices before attempting to solve
 pub fn solve(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
+    let data = a.get_data();
+
+    if data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "solve requires 2D array for A"));
+    }
+
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "Matrix A must be square"));
+    }
+
+    // Check if matrix is singular by computing determinant
+    let d = det(a)?;
+    if d.abs() < 1e-14 {
+        return Err(Error::new(exception::runtime_error(), "Matrix is singular and cannot be solved"));
+    }
+
     let a_inv = inv(a)?;
     matmul(&a_inv, b)
 }
 
-/// Least squares solution
-pub fn lstsq(a: &NDArray, b: &NDArray) -> Result<Obj<NDArray>, Error> {
-    // x = (A^T A)^-1 A^T b
-    let at = Obj::wrap(NDArray::new(a.get_data().t().to_owned()));
-    let ata = matmul(&at, a)?;
-    let ata_inv = inv(&ata)?;
-    let atb = matmul(&at, b)?;
-    matmul(&ata_inv, &atb)
+/// Least squares solution - returns (x, residuals, rank, singular_values)
+/// For compatibility, we return an RArray with 4 elements
+/// Note: singular_values is approximated since we don't have full SVD
+pub fn lstsq(a: &NDArray, b: &NDArray) -> Result<RArray, Error> {
+    let a_data = a.get_data();
+    let b_data = b.get_data();
+
+    if a_data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "lstsq requires 2D array for A"));
+    }
+
+    let shape = a_data.shape();
+    let _m = shape[0];
+    let _n = shape[1];
+
+    // Compute solution using pseudo-inverse
+    let a_pinv = pinv(a)?;
+    let x = matmul(&a_pinv, b)?;
+
+    // Compute residuals: ||b - Ax||^2
+    let ax = matmul(a, &x)?;
+    let ax_data = ax.get_data();
+    let residuals: f64 = b_data.iter()
+        .zip(ax_data.iter())
+        .map(|(&bi, &axi)| (bi - axi).powi(2))
+        .sum();
+    let residuals_arr = Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[1]), vec![residuals]).unwrap()
+    ));
+
+    // Compute rank
+    let r = rank(a)?;
+
+    // Approximate singular values using eigenvalues of A^T A
+    // sqrt of eigenvalues of A^T A would be singular values
+    // Since we don't have eig, we'll return an empty array for singular values
+    let s = Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0]))));
+
+    let result = RArray::new();
+    result.push(x)?;  // x is already Obj<NDArray>
+    result.push(residuals_arr)?;
+    result.push(r)?;
+    result.push(s)?;
+
+    Ok(result)
+}
+
+/// Matrix power (raise square matrix to integer power)
+pub fn matrix_power(arr: &NDArray, n: i64) -> Result<Obj<NDArray>, Error> {
+    let data = arr.get_data();
+
+    if data.ndim() != 2 {
+        return Err(Error::new(exception::arg_error(), "matrix_power requires 2D array"));
+    }
+
+    let shape = data.shape();
+    if shape[0] != shape[1] {
+        return Err(Error::new(exception::arg_error(), "Matrix must be square"));
+    }
+
+    let size = shape[0];
+
+    // Handle special cases
+    if n == 0 {
+        // Return identity matrix
+        let mut result = vec![0.0; size * size];
+        for i in 0..size {
+            result[i * size + i] = 1.0;
+        }
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[size, size]), result).unwrap(),
+        )));
+    }
+
+    if n == 1 {
+        return Ok(Obj::wrap(NDArray::new(data.clone())));
+    }
+
+    if n < 0 {
+        // For negative powers, compute inverse first
+        let arr_inv = inv(arr)?;
+        return matrix_power(&arr_inv, -n);
+    }
+
+    // For positive n, use repeated squaring (exponentiation by squaring)
+    let mut result_data = vec![0.0; size * size];
+    for i in 0..size {
+        result_data[i * size + i] = 1.0;
+    }
+    let mut result = Obj::wrap(NDArray::new(
+        ArrayD::from_shape_vec(IxDyn(&[size, size]), result_data).unwrap(),
+    ));
+
+    let mut base = Obj::wrap(NDArray::new(data.clone()));
+    let mut exp = n;
+
+    while exp > 0 {
+        if exp % 2 == 1 {
+            result = matmul(&result, &base)?;
+        }
+        base = matmul(&base, &base)?;
+        exp /= 2;
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]

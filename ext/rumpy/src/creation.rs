@@ -48,33 +48,37 @@ pub fn empty(shape: RArray) -> Result<Obj<NDArray>, Error> {
     zeros(shape)
 }
 
-/// Create an array with evenly spaced values within a given interval
+/// Create an array with evenly spaced values within a given interval.
+///
+/// Uses index-based calculation to avoid floating-point accumulation errors.
 pub fn arange(start: f64, stop: f64, step: f64) -> Result<Obj<NDArray>, Error> {
     if step == 0.0 {
         return Err(Error::new(exception::arg_error(), "Step cannot be zero"));
     }
 
-    let mut values = Vec::new();
-    let mut current = start;
-
-    if step > 0.0 {
-        while current < stop {
-            values.push(current);
-            current += step;
-        }
+    // Calculate number of elements to avoid accumulation error
+    let n = if step > 0.0 {
+        ((stop - start) / step).ceil() as usize
     } else {
-        while current > stop {
-            values.push(current);
-            current += step;
-        }
-    }
+        ((start - stop) / (-step)).ceil() as usize
+    };
+
+    // Use index-based calculation: value[i] = start + i * step
+    // This avoids accumulation error from repeated addition
+    let values: Vec<f64> = (0..n)
+        .map(|i| start + (i as f64) * step)
+        .take_while(|&v| if step > 0.0 { v < stop } else { v > stop })
+        .collect();
 
     let arr = ArrayD::from_shape_vec(IxDyn(&[values.len()]), values)
         .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
     Ok(Obj::wrap(NDArray::new(arr)))
 }
 
-/// Create evenly spaced numbers over a specified interval
+/// Create evenly spaced numbers over a specified interval.
+///
+/// The last element is guaranteed to be exactly equal to `stop` to avoid
+/// floating-point accumulation errors.
 pub fn linspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error> {
     if num == 0 {
         return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
@@ -86,27 +90,80 @@ pub fn linspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error
     }
 
     let step = (stop - start) / (num - 1) as f64;
-    let values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
+    let mut values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
+
+    // Ensure the last element is exactly equal to stop (avoid accumulation error)
+    if let Some(last) = values.last_mut() {
+        *last = stop;
+    }
 
     let arr = ArrayD::from_shape_vec(IxDyn(&[num]), values)
         .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
     Ok(Obj::wrap(NDArray::new(arr)))
 }
 
-/// Create numbers spaced evenly on a log scale
+/// Create numbers spaced evenly on a log scale (base 10)
 pub fn logspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error> {
+    logspace_base(start, stop, num, Some(10.0))
+}
+
+/// Create numbers spaced evenly on a log scale with custom base.
+///
+/// The first and last values are guaranteed to be exactly base^start and base^stop
+/// respectively, to avoid floating-point accumulation errors.
+pub fn logspace_base(start: f64, stop: f64, num: usize, base: Option<f64>) -> Result<Obj<NDArray>, Error> {
+    let base = base.unwrap_or(10.0);
+
     if num == 0 {
         return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
     }
     if num == 1 {
         return Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[1]), vec![10.0_f64.powf(start)]).unwrap(),
+            ArrayD::from_shape_vec(IxDyn(&[1]), vec![base.powf(start)]).unwrap(),
         )));
     }
 
     let step = (stop - start) / (num - 1) as f64;
+    let mut values: Vec<f64> = (0..num)
+        .map(|i| base.powf(start + step * i as f64))
+        .collect();
+
+    // Ensure the last value is exactly base^stop (avoid accumulation error)
+    if let Some(last) = values.last_mut() {
+        *last = base.powf(stop);
+    }
+
+    let arr = ArrayD::from_shape_vec(IxDyn(&[num]), values)
+        .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
+    Ok(Obj::wrap(NDArray::new(arr)))
+}
+
+/// Create numbers spaced evenly on a geometric scale
+pub fn geomspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error> {
+    if start == 0.0 || stop == 0.0 {
+        return Err(Error::new(exception::arg_error(), "Geometric sequence cannot include zero"));
+    }
+    if (start < 0.0) != (stop < 0.0) {
+        return Err(Error::new(exception::arg_error(), "Geometric sequence cannot include sign change"));
+    }
+
+    if num == 0 {
+        return Ok(Obj::wrap(NDArray::new(ArrayD::zeros(IxDyn(&[0])))));
+    }
+    if num == 1 {
+        return Ok(Obj::wrap(NDArray::new(
+            ArrayD::from_shape_vec(IxDyn(&[1]), vec![start]).unwrap(),
+        )));
+    }
+
+    // Use logarithmic spacing
+    let log_start = start.abs().ln();
+    let log_stop = stop.abs().ln();
+    let sign = if start < 0.0 { -1.0 } else { 1.0 };
+
+    let log_step = (log_stop - log_start) / (num - 1) as f64;
     let values: Vec<f64> = (0..num)
-        .map(|i| 10.0_f64.powf(start + step * i as f64))
+        .map(|i| sign * (log_start + log_step * i as f64).exp())
         .collect();
 
     let arr = ArrayD::from_shape_vec(IxDyn(&[num]), values)
@@ -116,12 +173,37 @@ pub fn logspace(start: f64, stop: f64, num: usize) -> Result<Obj<NDArray>, Error
 
 /// Create an identity matrix
 pub fn eye(n: usize) -> Result<Obj<NDArray>, Error> {
-    let mut data = vec![0.0; n * n];
+    eye_k(n, Some(n), Some(0))
+}
+
+/// Create an identity-like matrix with optional M (columns) and k (diagonal offset).
+///
+/// # Arguments
+/// * `n` - Number of rows
+/// * `m` - Number of columns (default: same as n)
+/// * `k` - Diagonal offset:
+///   - k > 0: k-th upper diagonal (above main diagonal)
+///   - k = 0: main diagonal (default)
+///   - k < 0: k-th lower diagonal (below main diagonal)
+///
+/// # Large Negative k
+/// For k < -n+1 (e.g., k=-5 for a 3x3 matrix), the diagonal falls entirely
+/// outside the matrix, resulting in a zero matrix. This matches NumPy behavior.
+pub fn eye_k(n: usize, m: Option<usize>, k: Option<i64>) -> Result<Obj<NDArray>, Error> {
+    let m = m.unwrap_or(n);
+    let k = k.unwrap_or(0);
+
+    let mut data = vec![0.0; n * m];
     for i in 0..n {
-        data[i * n + i] = 1.0;
+        // Handle negative k without overflow
+        let j_signed = i as i64 + k;
+        if j_signed >= 0 && (j_signed as usize) < m {
+            let j = j_signed as usize;
+            data[i * m + j] = 1.0;
+        }
     }
 
-    let arr = ArrayD::from_shape_vec(IxDyn(&[n, n]), data)
+    let arr = ArrayD::from_shape_vec(IxDyn(&[n, m]), data)
         .map_err(|e| Error::new(exception::runtime_error(), format!("{}", e)))?;
     Ok(Obj::wrap(NDArray::new(arr)))
 }
@@ -133,28 +215,54 @@ pub fn identity(n: usize) -> Result<Obj<NDArray>, Error> {
 
 /// Extract a diagonal or construct a diagonal array
 pub fn diag(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
+    diag_k(arr, Some(0))
+}
+
+/// Extract a diagonal or construct a diagonal array with k offset
+/// k > 0: diagonal above main, k < 0: diagonal below main
+pub fn diag_k(arr: &NDArray, k: Option<i64>) -> Result<Obj<NDArray>, Error> {
     let data = arr.get_data();
     let shape = data.shape();
+    let k = k.unwrap_or(0);
 
     if shape.len() == 1 {
-        // 1D -> create diagonal matrix
+        // 1D -> create diagonal matrix with offset k
         let n = shape[0];
-        let mut result = vec![0.0; n * n];
+        let matrix_size = n + k.unsigned_abs() as usize;
+        let mut result = vec![0.0; matrix_size * matrix_size];
         for (i, &val) in data.iter().enumerate() {
-            result[i * n + i] = val;
+            let row = if k >= 0 { i } else { i + (-k) as usize };
+            let col = if k >= 0 { i + k as usize } else { i };
+            if row < matrix_size && col < matrix_size {
+                result[row * matrix_size + col] = val;
+            }
         }
         Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[n, n]), result).unwrap(),
+            ArrayD::from_shape_vec(IxDyn(&[matrix_size, matrix_size]), result).unwrap(),
         )))
     } else if shape.len() == 2 {
-        // 2D -> extract diagonal
-        let n = shape[0].min(shape[1]);
-        let mut result = vec![0.0; n];
-        for i in 0..n {
-            result[i] = data[[i, i]];
+        // 2D -> extract diagonal with offset k
+        let m = shape[0];
+        let n = shape[1];
+        let start_row = if k < 0 { (-k) as usize } else { 0 };
+        let start_col = if k > 0 { k as usize } else { 0 };
+
+        let diag_len = if k >= 0 {
+            m.min(n.saturating_sub(k as usize))
+        } else {
+            n.min(m.saturating_sub((-k) as usize))
+        };
+
+        let mut result = vec![0.0; diag_len];
+        for i in 0..diag_len {
+            let row = start_row + i;
+            let col = start_col + i;
+            if row < m && col < n {
+                result[i] = data[[row, col]];
+            }
         }
         Ok(Obj::wrap(NDArray::new(
-            ArrayD::from_shape_vec(IxDyn(&[n]), result).unwrap(),
+            ArrayD::from_shape_vec(IxDyn(&[diag_len]), result).unwrap(),
         )))
     } else {
         Err(Error::new(
@@ -164,18 +272,83 @@ pub fn diag(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     }
 }
 
-/// Create a zeros array with the same shape as another array
+/// Create a zeros array with the same shape as another array.
+///
+/// # Scalar Arrays
+/// For scalar arrays (0-dimensional, shape=[]), returns a scalar array containing 0.0.
+/// This matches NumPy's behavior where zeros_like(np.array(5.0)) returns array(0.0).
 pub fn zeros_like(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let shape = arr.shape();
     let result = ArrayD::zeros(IxDyn(&shape));
     Ok(Obj::wrap(NDArray::new(result)))
 }
 
-/// Create a ones array with the same shape as another array
+/// Create a ones array with the same shape as another array.
+///
+/// # Scalar Arrays
+/// For scalar arrays (0-dimensional, shape=[]), returns a scalar array containing 1.0.
+/// This matches NumPy's behavior where ones_like(np.array(5.0)) returns array(1.0).
 pub fn ones_like(arr: &NDArray) -> Result<Obj<NDArray>, Error> {
     let shape = arr.shape();
     let result = ArrayD::ones(IxDyn(&shape));
     Ok(Obj::wrap(NDArray::new(result)))
+}
+
+/// Create coordinate matrices from coordinate vectors (meshgrid)
+/// Uses 'xy' indexing by default (Cartesian)
+pub fn meshgrid(x: &NDArray, y: &NDArray) -> Result<RArray, Error> {
+    meshgrid_indexing(x, y, None)
+}
+
+/// Create coordinate matrices with indexing parameter
+/// indexing='xy' (default): Cartesian indexing (X varies along columns, Y along rows)
+/// indexing='ij': Matrix indexing (X varies along rows, Y along columns)
+pub fn meshgrid_indexing(x: &NDArray, y: &NDArray, indexing: Option<String>) -> Result<RArray, Error> {
+    let x_data = x.get_data();
+    let y_data = y.get_data();
+
+    let nx = x_data.len();
+    let ny = y_data.len();
+
+    let indexing = indexing.unwrap_or_else(|| "xy".to_string());
+
+    let (xx, yy, shape) = if indexing == "ij" {
+        // Matrix indexing: X varies along rows (axis 0), Y along columns (axis 1)
+        // Shape is (nx, ny)
+        let mut xx = Vec::with_capacity(nx * ny);
+        let mut yy = Vec::with_capacity(nx * ny);
+
+        for &xv in x_data.iter() {
+            for &yv in y_data.iter() {
+                xx.push(xv);
+                yy.push(yv);
+            }
+        }
+
+        (xx, yy, vec![nx, ny])
+    } else {
+        // Cartesian indexing (default 'xy'): X varies along columns, Y along rows
+        // Shape is (ny, nx)
+        let mut xx = Vec::with_capacity(ny * nx);
+        let mut yy = Vec::with_capacity(ny * nx);
+
+        for &yv in y_data.iter() {
+            for &xv in x_data.iter() {
+                xx.push(xv);
+                yy.push(yv);
+            }
+        }
+
+        (xx, yy, vec![ny, nx])
+    };
+
+    let xx_arr = NDArray::new(ArrayD::from_shape_vec(IxDyn(&shape), xx).unwrap());
+    let yy_arr = NDArray::new(ArrayD::from_shape_vec(IxDyn(&shape), yy).unwrap());
+
+    let result = RArray::new();
+    result.push(Obj::wrap(xx_arr))?;
+    result.push(Obj::wrap(yy_arr))?;
+    Ok(result)
 }
 
 #[cfg(test)]

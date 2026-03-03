@@ -18,26 +18,95 @@ module RumPy
     end
 
     def full_like(arr, value)
-      result = zeros_like(arr)
-      # Would need to implement fill
-      result
+      arr = array(arr) unless arr.is_a?(NDArray)
+      full(arr.shape, value)
     end
 
-    # Axis-aware aggregations (simplified - ignores axis for now)
+    # Axis-aware aggregations with proper axis/keepdims support
     def sum(arr, axis: nil, keepdims: false)
-      if arr.is_a?(NDArray)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
         arr.sum
       else
-        array(arr).sum
+        result = sum_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
       end
     end
 
     def mean(arr, axis: nil, keepdims: false)
-      if arr.is_a?(NDArray)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
         arr.mean
       else
-        array(arr).mean
+        result = mean_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
       end
+    end
+
+    def std(arr, axis: nil, ddof: 0, keepdims: false)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        std_ddof(arr, ddof)
+      else
+        result = std_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
+      end
+    end
+
+    def var(arr, axis: nil, ddof: 0, keepdims: false)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        var_ddof(arr, ddof)
+      else
+        result = var_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
+      end
+    end
+
+    def min(arr, axis: nil, keepdims: false)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        arr.min
+      else
+        result = min_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
+      end
+    end
+
+    def max(arr, axis: nil, keepdims: false)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        arr.max
+      else
+        result = max_axis(arr, axis)
+        keepdims ? _keepdims_reshape(result, arr.shape, axis) : result
+      end
+    end
+
+    def argmin(arr, axis: nil)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        arr.argmin
+      else
+        argmin_axis(arr, axis)
+      end
+    end
+
+    def argmax(arr, axis: nil)
+      arr = array(arr) unless arr.is_a?(NDArray)
+      if axis.nil?
+        arr.argmax
+      else
+        argmax_axis(arr, axis)
+      end
+    end
+
+    # Helper to restore reduced dimension for keepdims
+    def _keepdims_reshape(result, original_shape, axis)
+      return result unless result.is_a?(NDArray)
+      new_shape = original_shape.dup
+      new_shape[axis] = 1
+      result.reshape(new_shape)
     end
 
     # Reshape convenience
@@ -58,7 +127,6 @@ module RumPy
     class << self
       # Common aliases
       alias_method :matrix_rank, :rank
-      alias_method :matrix_power, :matmul
     end
   end
 
